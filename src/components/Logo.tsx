@@ -2,12 +2,12 @@ import Link from "next/link";
 import { site } from "@/lib/site";
 
 /**
- * ByteStack mark: three isometric "byte" plates stacked on a gradient tile,
- * a nod to the value stack every frame lives on.
+ * ByteMong mark: a mongoose face on a gradient tile, with square "bit" eyes.
+ * Keep in sync with src/app/icon.svg.
  */
-export function LogoMark({ size = 30, id = "bs" }: { size?: number; id?: string }) {
+export function LogoMark({ size = 30, id = "bm" }: { size?: number; id?: string }) {
   const tile = `${id}-tile`;
-  const plate = `${id}-plate`;
+  const head = `${id}-head`;
   return (
     <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden>
       <defs>
@@ -16,23 +16,25 @@ export function LogoMark({ size = 30, id = "bs" }: { size?: number; id?: string 
           <stop offset=".55" stopColor="#6d5cf6" />
           <stop offset="1" stopColor="#a855f7" />
         </linearGradient>
-        <linearGradient id={plate} x1="8" y1="6" x2="24" y2="14" gradientUnits="userSpaceOnUse">
+        <linearGradient id={head} x1="8" y1="6" x2="24" y2="26" gradientUnits="userSpaceOnUse">
           <stop stopColor="#ffffff" />
           <stop offset="1" stopColor="#e0e7ff" />
         </linearGradient>
       </defs>
       <rect x="1" y="1" width="30" height="30" rx="8.5" fill={`url(#${tile})`} />
       <rect x="1.5" y="1.5" width="29" height="29" rx="8" stroke="white" strokeOpacity=".22" />
-      {/* bottom plate */}
-      <path d="M16 18.6 24.6 22.6 16 26.6 7.4 22.6Z" fill="white" fillOpacity=".35" />
-      {/* middle plate */}
-      <path d="M16 13.4 24.6 17.4 16 21.4 7.4 17.4Z" fill="white" fillOpacity=".62" stroke="#5b4fe0" strokeOpacity=".35" strokeWidth=".6" />
-      {/* top plate */}
-      <path d="M16 8.2 24.6 12.2 16 16.2 7.4 12.2Z" fill={`url(#${plate})`} stroke="#4c3fd6" strokeOpacity=".35" strokeWidth=".6" />
-      {/* "bits" on the top plate */}
-      <circle cx="13.4" cy="12.2" r="1" fill="#6d5cf6" />
-      <circle cx="16" cy="12.2" r="1" fill="#6d5cf6" fillOpacity=".55" />
-      <circle cx="18.6" cy="12.2" r="1" fill="#6d5cf6" />
+      {/* round ears */}
+      <circle cx="9.6" cy="10.2" r="3.2" fill={`url(#${head})`} />
+      <circle cx="22.4" cy="10.2" r="3.2" fill={`url(#${head})`} />
+      <circle cx="9.6" cy="10.2" r="1.5" fill="#6d5cf6" fillOpacity=".4" />
+      <circle cx="22.4" cy="10.2" r="1.5" fill="#6d5cf6" fillOpacity=".4" />
+      {/* head tapering to a long snout */}
+      <path d="M7.4 15.4Q7.4 9.8 16 9.8Q24.6 9.8 24.6 15.4Q24.6 19.2 19.6 22.4L17.4 26Q16 27.4 14.6 26L12.4 22.4Q7.4 19.2 7.4 15.4Z" fill={`url(#${head})`} />
+      {/* square "bit" eyes */}
+      <rect x="10.6" y="13.6" width="3.2" height="3.2" rx=".8" fill="#4c3fd6" />
+      <rect x="18.2" y="13.6" width="3.2" height="3.2" rx=".8" fill="#4c3fd6" />
+      {/* nose */}
+      <ellipse cx="16" cy="24.6" rx="1.7" ry="1.2" fill="#4c3fd6" />
     </svg>
   );
 }
@@ -40,7 +42,7 @@ export function LogoMark({ size = 30, id = "bs" }: { size?: number; id?: string 
 export function Wordmark({ className = "text-[15px]" }: { className?: string }) {
   return (
     <span className={`font-semibold tracking-tight text-ink ${className}`}>
-      Byte<span className="text-gradient">Stack</span>
+      Byte<span className="text-gradient">Mong</span>
     </span>
   );
 }

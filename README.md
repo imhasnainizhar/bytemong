@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="src/app/icon.svg" width="72" height="72" alt="ByteStack logo" />
+  <img src="src/app/icon.svg" width="72" height="72" alt="ByteMong logo" />
 </p>
 
-<h1 align="center">ByteStack</h1>
+<h1 align="center">ByteMong</h1>
 
 <p align="center">
   Learn the Java Virtual Machine by building your own bytecode VM.
@@ -10,7 +10,7 @@
 
 ---
 
-ByteStack is an interactive, learner-first guide to how virtual machines work. Each topic starts with what the **JVM** does (class loading, the operand stack, the template interpreter, garbage collection, tiered JIT, Loom, safepoints) and then shows how to build the same piece for **Wisp**, a small scripting language built on functions and prototypes instead of classes.
+ByteMong is an interactive, learner-first guide to how virtual machines work. Each topic starts with what the **JVM** does (class loading, the operand stack, the template interpreter, garbage collection, tiered JIT, Loom, safepoints) and then shows how to build the same piece for **Wisp**, a small scripting language built on functions and prototypes instead of classes.
 
 It isn't interview prep. Every lesson pairs a live simulation with questions that are answered twice: once as a plain-language intuition and once "under the hood".
 
