@@ -44,55 +44,60 @@ const features = [
   },
 ];
 
+// Every call-to-action button shares one fixed width so pairs line up exactly.
+const btnBase = "inline-flex w-[220px] items-center justify-center gap-2 rounded-lg border border-transparent px-5 py-2.5 text-[14px] font-medium transition";
+const btnPrimary = "bg-gradient-to-r from-blue to-violet text-white shadow-[0_8px_30px_-8px_rgba(124,92,255,0.7)] hover:brightness-110";
+const btnGhost = "!border-line bg-white/[0.03] text-ink hover:border-line-strong hover:bg-white/[0.06]";
+
 export default function Home() {
   return (
     <>
       {/* HERO */}
-      <section className="relative mx-auto grid max-w-7xl items-center gap-14 px-4 pb-24 pt-32 sm:px-6 lg:grid-cols-[1.05fr_1fr] lg:pt-40">
-        <div>
-          <Reveal>
-            <span className="inline-flex items-center gap-2 rounded-full border border-line bg-white/[0.03] px-3 py-1 text-[12px] text-muted">
-              <span className="h-1.5 w-1.5 rounded-full bg-violet animate-pulse-soft" />
-              JVM lessons · build your own VM
+      <section className="relative mx-auto flex max-w-5xl flex-col items-center px-4 pb-24 pt-32 text-center sm:px-6 lg:pt-40">
+        <Reveal>
+          <span className="inline-flex items-center gap-2 rounded-full border border-line bg-white/[0.03] px-3 py-1 text-[12px] text-muted">
+            <span className="h-1.5 w-1.5 rounded-full bg-violet animate-pulse-soft" />
+            JVM lessons · build your own VM
+          </span>
+        </Reveal>
+        <Reveal delay={0.05}>
+          <h1 className="mt-6 font-bold tracking-tight">
+            <span className="block text-[clamp(2.4rem,6vw,4rem)] leading-[1.05]">Build a VM.</span>
+            <span className="mt-2 block text-[clamp(1.35rem,3.2vw,2.1rem)] font-semibold leading-tight text-[#c9c9d3]">
+              Understand the <span className="text-gradient">JVM</span>.
             </span>
-          </Reveal>
-          <Reveal delay={0.05}>
-            <h1 className="mt-6 text-[clamp(2.5rem,6vw,4.4rem)] font-bold leading-[1.04] tracking-tight">
-              Learn the <span className="text-gradient">Java Virtual Machine</span> by building your own.
-            </h1>
-          </Reveal>
-          <Reveal delay={0.1}>
-            <p className="mt-6 max-w-xl text-[17px] leading-relaxed text-muted">
-              The JVM is one of the best-studied runtimes ever built. Use what it teaches to design a modern bytecode VM for{" "}
-              <span className="text-ink">Wisp</span>, a small scripting language built on functions and prototypes instead of classes.
-            </p>
-          </Reveal>
-          <Reveal delay={0.15}>
-            <div className="mt-8 flex flex-wrap gap-3">
-              <Link
-                href="/architecture"
-                className="group inline-flex items-center gap-2 rounded-lg bg-gradient-to-r from-blue to-violet px-5 py-2.5 text-[14px] font-medium text-white shadow-[0_8px_30px_-8px_rgba(124,92,255,0.7)] transition hover:brightness-110"
-              >
+          </h1>
+        </Reveal>
+        <Reveal delay={0.1}>
+          <p className="mx-auto mt-5 max-w-xl text-[15px] font-light leading-relaxed text-muted">
+            Learn from one of the best-studied runtimes ever built, then use those lessons to build a modern bytecode VM for a small scripting
+            language, one interactive stop at a time.
+          </p>
+        </Reveal>
+        {/* HeroDiagram animates itself in; a Reveal wrapper would shrink it to content width. */}
+        <div className="mt-10 w-full max-w-2xl text-left">
+          <HeroDiagram />
+        </div>
+        <div>
+          <Reveal delay={0.2}>
+            <div className="mt-10 flex flex-wrap justify-center gap-3">
+              <Link href="/architecture" className={`group ${btnBase} ${btnPrimary}`}>
                 Explore Architecture
                 <ArrowRight className="h-4 w-4 transition group-hover:translate-x-0.5" />
               </Link>
-              <a
-                href="#roadmap"
-                className="inline-flex items-center gap-2 rounded-lg border border-line bg-white/[0.03] px-5 py-2.5 text-[14px] text-ink transition hover:border-line-strong hover:bg-white/[0.06]"
-              >
+              <a href="#roadmap" className={`${btnBase} ${btnGhost}`}>
                 View Roadmap
               </a>
             </div>
           </Reveal>
-          <Reveal delay={0.2}>
-            <div className="mt-10 flex flex-wrap gap-x-6 gap-y-2 text-[12.5px] text-faint">
+          <Reveal delay={0.25}>
+            <div className="mt-8 flex flex-wrap justify-center gap-x-6 gap-y-2 text-[12.5px] text-faint">
               <span className="flex items-center gap-2"><span className="h-1.5 w-1.5 rounded-full bg-emerald" />{roadmap.length} roadmap stops</span>
               <span className="flex items-center gap-2"><span className="h-1.5 w-1.5 rounded-full bg-blue" />{lessons.filter((l) => l.sim !== "flow").length} live simulations</span>
               <span className="flex items-center gap-2"><span className="h-1.5 w-1.5 rounded-full bg-violet" />{lessons.reduce((n, l) => n + l.questions.length, 0)} guided questions</span>
             </div>
           </Reveal>
         </div>
-        <HeroDiagram />
       </section>
 
       {/* WHY */}
@@ -147,17 +152,11 @@ export default function Home() {
               Start with the big picture, then go stop by stop. Your VM will grow alongside your understanding.
             </p>
             <div className="relative mt-8 flex flex-wrap justify-center gap-3">
-              <Link
-                href="/learn/how-code-runs"
-                className="inline-flex items-center gap-2 rounded-lg bg-gradient-to-r from-blue to-violet px-5 py-2.5 text-[14px] font-medium text-white transition hover:brightness-110"
-              >
-                Start learning <ArrowRight className="h-4 w-4" />
+              <Link href="/learn/how-code-runs" className={`group ${btnBase} ${btnPrimary}`}>
+                Start Learning <ArrowRight className="h-4 w-4 transition group-hover:translate-x-0.5" />
               </Link>
-              <Link
-                href="/learn/bytecode"
-                className="inline-flex items-center gap-2 rounded-lg border border-line bg-white/[0.03] px-5 py-2.5 text-[14px] text-ink transition hover:border-line-strong"
-              >
-                Open the bytecode playground
+              <Link href="/learn/bytecode" className={`${btnBase} ${btnGhost}`}>
+                Bytecode Playground
               </Link>
             </div>
           </div>
