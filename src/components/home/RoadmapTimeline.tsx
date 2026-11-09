@@ -48,20 +48,25 @@ export function RoadmapTimeline({ items }: { items: RoadmapItem[] }) {
                 transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
                 className={`pl-10 md:pl-0 ${left ? "md:col-start-1" : "md:col-start-2"}`}
               >
-                <Link href={it.href} className="card card-hover group flex gap-4 p-5 hover:-translate-y-0.5">
+                <Link href={it.href} className="card card-hover group grid grid-cols-[auto_1fr_auto] items-start gap-x-4 gap-y-3 p-5 hover:-translate-y-0.5 sm:gap-y-1.5">
                   <span
                     className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border"
                     style={{ borderColor: `${color}40`, background: `${color}14`, color }}
                   >
                     <Icon name={it.icon} className="h-[18px] w-[18px]" />
                   </span>
-                  <div className="min-w-0 flex-1">
+                  <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <span className="font-mono text-[11px] text-faint">{it.num}</span>
                       <span className={`rounded-md border px-1.5 py-px text-[10px] font-medium ${levelStyle[it.level]}`}>{it.level}</span>
                     </div>
                     <h3 className="mt-1.5 text-[16px] font-semibold text-ink">{it.title}</h3>
-                    <p className="mt-1.5 text-[13.5px] leading-relaxed text-muted">{it.summary}</p>
+                  </div>
+                  {/* Mobile: bottom-right, level with the last row of tags. sm+: top-right beside the title. */}
+                  <ChevronRight className="col-start-3 row-start-2 mb-1.5 h-4 w-4 shrink-0 self-end text-faint transition group-hover:translate-x-0.5 group-hover:text-ink sm:row-start-1 sm:mb-0 sm:mt-1 sm:self-start" />
+                  {/* Mobile: spans the card from the icon's edge. sm+: sits under the title. */}
+                  <div className="col-span-2 col-start-1 row-start-2 min-w-0 sm:col-span-1 sm:col-start-2">
+                    <p className="text-[13.5px] leading-relaxed text-muted">{it.summary}</p>
                     <div className="mt-3 flex flex-wrap gap-1.5">
                       {it.tags.map((t) => (
                         <span key={t} className="chip">
@@ -70,7 +75,6 @@ export function RoadmapTimeline({ items }: { items: RoadmapItem[] }) {
                       ))}
                     </div>
                   </div>
-                  <ChevronRight className="mt-1 h-4 w-4 shrink-0 text-faint transition group-hover:translate-x-0.5 group-hover:text-ink" />
                 </Link>
               </motion.div>
             </li>
