@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" fill="none">
+  <defs>
+    <linearGradient id="t" x1="2" y1="1" x2="30" y2="31" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3b82f6"/>
+      <stop offset=".55" stop-color="#6d5cf6"/>
+      <stop offset="1" stop-color="#a855f7"/>
+    </linearGradient>
+    <linearGradient id="p" x1="8" y1="6" x2="24" y2="14" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#e0e7ff"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="30" height="30" rx="8.5" fill="url(#t)"/>
+  <path d="M16 18.6 24.6 22.6 16 26.6 7.4 22.6Z" fill="#fff" fill-opacity=".35"/>
+  <path d="M16 13.4 24.6 17.4 16 21.4 7.4 17.4Z" fill="#fff" fill-opacity=".62" stroke="#5b4fe0" stroke-opacity=".35" stroke-width=".6"/>
+  <path d="M16 8.2 24.6 12.2 16 16.2 7.4 12.2Z" fill="url(#p)" stroke="#4c3fd6" stroke-opacity=".35" stroke-width=".6"/>
+  <circle cx="13.4" cy="12.2" r="1" fill="#6d5cf6"/>
+  <circle cx="16" cy="12.2" r="1" fill="#6d5cf6" fill-opacity=".55"/>
+  <circle cx="18.6" cy="12.2" r="1" fill="#6d5cf6"/>
+</svg>
