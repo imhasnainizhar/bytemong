@@ -45,6 +45,8 @@ export interface Reference {
 
 /** One step of the build-along: what to write, the code, and how the code works. */
 export interface BuildStep {
+  /** Starts a new group of steps, e.g. "Part 1 · The lexer". */
+  section?: string;
   title: string;
   /** What we're about to write and why. */
   body: string;

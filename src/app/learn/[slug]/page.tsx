@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { Suspense } from "react";
+import { Fragment, Suspense } from "react";
 import { ArrowLeft, ArrowRight, BookOpen, Coffee, ExternalLink, FileText, Flag, Hammer, HelpCircle, Lightbulb, ListVideo, PlayCircle } from "lucide-react";
 import { accentHex, getLesson, lessons, neighbours, roadmap, type Reference } from "@/content";
 import { CodeBlock } from "@/components/CodeBlock";
@@ -199,7 +199,14 @@ async function Lesson({ params }: { params: Promise<{ slug: string }> }) {
           )}
           <ol className="relative mt-8 space-y-10 border-l border-line pl-6 sm:pl-8">
             {lesson.build.steps.map((s, i) => (
-              <li key={s.title} className="relative">
+              <Fragment key={s.title}>
+              {s.section && (
+                <li className="relative !mt-14 first:!mt-0">
+                  <span className="absolute -left-[29px] top-1.5 h-2.5 w-2.5 rounded-full bg-emerald/60 ring-4 ring-bg sm:-left-[37px]" />
+                  <div className="text-[12px] font-medium uppercase tracking-[0.16em] text-emerald">{s.section}</div>
+                </li>
+              )}
+              <li className="relative">
                 <span className="absolute -left-[37px] flex h-7 w-7 items-center justify-center rounded-full border border-emerald/40 bg-bg font-mono text-[11px] text-emerald sm:-left-[45px]">
                   {i + 1}
                 </span>
@@ -244,6 +251,7 @@ async function Lesson({ params }: { params: Promise<{ slug: string }> }) {
                   </div>
                 )}
               </li>
+              </Fragment>
             ))}
           </ol>
         </section>
