@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Suspense } from "react";
-import { ArrowLeft, ArrowRight, Coffee, Hammer, HelpCircle } from "lucide-react";
-import { accentHex, getLesson, lessons, neighbours, roadmap } from "@/content";
+import { ArrowLeft, ArrowRight, BookOpen, Coffee, ExternalLink, FileText, Flag, Hammer, HelpCircle, Lightbulb, ListVideo, PlayCircle } from "lucide-react";
+import { accentHex, getLesson, lessons, neighbours, roadmap, type Reference } from "@/content";
 import { CodeBlock } from "@/components/CodeBlock";
 import { Icon } from "@/components/Icon";
 import { Reveal } from "@/components/Reveal";
@@ -26,6 +26,42 @@ export default function LessonPage({ params }: PageProps<"/learn/[slug]">) {
     <Suspense fallback={<LessonSkeleton />}>
       <Lesson params={params} />
     </Suspense>
+  );
+}
+
+const refIcon = { video: PlayCircle, playlist: ListVideo, book: BookOpen, article: FileText, spec: FileText } as const;
+
+function References({ refs }: { refs: Reference[] }) {
+  return (
+    <div className="mt-8 max-w-3xl">
+      <div className="text-[11px] font-medium uppercase tracking-[0.16em] text-faint">Watch &amp; read alongside</div>
+      <div className="mt-3 grid gap-2 sm:grid-cols-2">
+        {refs.map((r) => {
+          const I = refIcon[r.kind];
+          return (
+            <a
+              key={r.url}
+              href={r.url}
+              target="_blank"
+              rel="noreferrer"
+              className="group flex gap-3 rounded-lg border border-line bg-white/[0.02] p-3 transition hover:border-line-strong hover:bg-white/[0.04]"
+            >
+              <I className="mt-0.5 h-4 w-4 shrink-0 text-violet-300" />
+              <span className="min-w-0">
+                <span className="flex items-center gap-1 text-[13.5px] font-medium text-ink">
+                  <span className="truncate">{r.title}</span>
+                  <ExternalLink className="h-3 w-3 shrink-0 text-faint transition group-hover:text-ink" />
+                </span>
+                <span className="mt-0.5 block text-[12px] text-faint">
+                  {r.by} · {r.kind}
+                </span>
+                {r.note && <span className="mt-1 block text-[12.5px] leading-snug text-muted">{r.note}</span>}
+              </span>
+            </a>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -76,6 +112,7 @@ async function Lesson({ params }: { params: Promise<{ slug: string }> }) {
             </p>
           ))}
         </div>
+        {lesson.references && <References refs={lesson.references} />}
       </Reveal>
 
       {/* Simulation */}
@@ -151,10 +188,19 @@ async function Lesson({ params }: { params: Promise<{ slug: string }> }) {
           <p className="mt-3 max-w-3xl text-[15.5px] leading-relaxed text-muted">
             <Rich text={lesson.build.intro} />
           </p>
-          <ol className="relative mt-8 space-y-8 border-l border-line pl-8">
+          {lesson.build.milestone && (
+            <div className="mt-5 flex max-w-3xl items-start gap-3 rounded-lg border border-emerald/25 bg-emerald/[0.05] px-4 py-3 text-[14px] leading-relaxed text-[#c4c4cc]">
+              <Flag className="mt-0.5 h-4 w-4 shrink-0 text-emerald" />
+              <span>
+                <span className="font-medium text-emerald">By the end: </span>
+                <Rich text={lesson.build.milestone} />
+              </span>
+            </div>
+          )}
+          <ol className="relative mt-8 space-y-10 border-l border-line pl-6 sm:pl-8">
             {lesson.build.steps.map((s, i) => (
               <li key={s.title} className="relative">
-                <span className="absolute -left-[45px] flex h-7 w-7 items-center justify-center rounded-full border border-emerald/40 bg-bg font-mono text-[11px] text-emerald">
+                <span className="absolute -left-[37px] flex h-7 w-7 items-center justify-center rounded-full border border-emerald/40 bg-bg font-mono text-[11px] text-emerald sm:-left-[45px]">
                   {i + 1}
                 </span>
                 <h3 className="text-[16px] font-semibold text-ink">{s.title}</h3>
@@ -164,6 +210,37 @@ async function Lesson({ params }: { params: Promise<{ slug: string }> }) {
                 {s.code && (
                   <div className="mt-4 max-w-3xl">
                     <CodeBlock code={s.code.code} lang={s.code.lang} caption={s.code.caption} />
+                  </div>
+                )}
+                {s.explain && (
+                  <div className="mt-4 max-w-3xl rounded-lg border border-line bg-white/[0.015] p-4">
+                    <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-blue">
+                      <Lightbulb className="h-3.5 w-3.5" /> How it works
+                    </div>
+                    <ul className="mt-2.5 space-y-2">
+                      {s.explain.map((e, k) => (
+                        <li key={k} className="flex gap-2.5 text-[13.5px] leading-relaxed text-[#a9a9b4]">
+                          <span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-blue" />
+                          <span>
+                            <Rich text={e} />
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {s.output && (
+                  <div className="mt-4 max-w-3xl">
+                    <CodeBlock code={s.output} lang="text" caption="output" />
+                  </div>
+                )}
+                {s.jvm && (
+                  <div className="mt-4 flex max-w-3xl gap-2.5 rounded-lg border border-amber/20 bg-amber/[0.04] px-4 py-3 text-[13.5px] leading-relaxed text-[#b0b0ba]">
+                    <Coffee className="mt-0.5 h-4 w-4 shrink-0 text-amber" />
+                    <span>
+                      <span className="font-medium text-amber">In the JVM: </span>
+                      <Rich text={s.jvm} />
+                    </span>
                   </div>
                 )}
               </li>
