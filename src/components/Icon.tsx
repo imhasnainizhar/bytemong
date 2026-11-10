@@ -14,6 +14,7 @@ import {
   Recycle,
   Rocket,
   Shapes,
+  SquareTerminal,
   Zap,
   type LucideProps,
 } from "lucide-react";
@@ -34,6 +35,7 @@ const icons = {
   Recycle,
   Rocket,
   Shapes,
+  SquareTerminal,
   Zap,
 };
 
