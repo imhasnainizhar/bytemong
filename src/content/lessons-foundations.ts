@@ -1,514 +1,1525 @@
-import type { Lesson } from "./types";
+import type { Lesson, Reference } from "./types";
+
+const ci = (title: string, page: string, note?: string): Reference => ({
+  title: `Crafting Interpreters: ${title}`,
+  by: "Robert Nystrom",
+  url: `https://craftinginterpreters.com/${page}.html`,
+  kind: "book",
+  note,
+});
+
+const jvms = (title: string, page: string, note?: string): Reference => ({
+  title: `JVM Specification: ${title}`,
+  by: "Oracle",
+  url: `https://docs.oracle.com/javase/specs/jvms/se21/html/${page}`,
+  kind: "spec",
+  note,
+});
 
 export const foundationLessons: Lesson[] = [
+  /* ───────────────────────────── 00 · How code runs ───────────────────────────── */
   {
     slug: "how-code-runs",
     title: "How Code Runs",
     level: "Foundational",
     accent: "blue",
     icon: "Play",
-    summary: "Follow a program from source text to a running result, and see why the JVM puts bytecode in the middle.",
-    tags: ["Source → Bytecode → Execution", "Front end vs back end", "Portability", "Your VM's pipeline"],
+    summary: "See the path from source text to a running program, the way the JVM does it, and set up the Rust project you'll grow lesson by lesson.",
+    tags: ["Source → Bytecode → VM", "javac vs JVM", "Project setup", "The Wisp language"],
     intro: [
-      "Java never runs your source code directly. `javac` turns `.java` files into `.class` files full of bytecode, and the JVM runs that bytecode. The bytecode is the agreement between the two halves. The compiler only has to produce valid bytecode, and the VM only has to run valid bytecode, so neither side needs to know how the other works.",
-      "Your VM will use the same split, only smaller. A script goes through a lexer, a parser and a compiler, and the result is a compact array of instructions that a tight loop executes. This lesson builds the overall picture that every later lesson fills in.",
+      "Java never runs your source code directly. `javac` turns `.java` files into `.class` files full of **bytecode**, and the JVM runs that bytecode. Bytecode is the contract between the two halves. The compiler only has to produce valid bytecode, and the VM only has to run it. Neither needs to know how the other works.",
+      "In this course you'll build the same split, in Rust, for a tiny scripting language called **Wisp**. Wisp has numbers, strings, tables, functions and closures, and no classes. Every lesson adds one working piece to one growing codebase, and each piece is explained next to how the JVM does the same job.",
     ],
     sim: "pipeline",
     simTitle: "Step a tiny Wisp program through every stage",
     jvm: {
       title: "What the JVM teaches us",
       points: [
-        "`javac` and the JVM are separate programs that talk only through the class-file format. Because of that contract, Kotlin, Scala and Clojure can all run on the JVM.",
-        "Execution is layered. Bytecode starts out interpreted, and methods that run often (hot methods) are compiled to machine code by the JIT, so startup stays fast and long runs get faster.",
-        "The JDK is the tools plus the JRE, and the JRE is the JVM plus the standard library. The VM itself is a small core with a large library around it.",
-        "Portability comes from a precisely specified bytecode, not from the source language. Every JVM must agree on what each instruction means.",
+        "`javac` and the JVM are separate programs that only talk through the class-file format. Kotlin, Scala and Clojure can run on the JVM because they produce the same format.",
+        "Execution is layered. The JVM starts by **interpreting** bytecode, then compiles hot methods to machine code (the JIT). We'll build the interpreter, which is the part every VM needs first.",
+        "A `.class` file holds a **constant pool** (numbers, strings, names), the bytecode of every method, and debug tables such as line numbers. Your compiled Wisp functions will hold the same three things.",
+        "The JVM is a **stack machine**. Instructions take their inputs from an operand stack and push their results back. Wisp's VM works the same way.",
       ],
     },
     concepts: [
       {
-        heading: "Why not just walk the syntax tree?",
+        heading: "Look at real JVM bytecode first",
         body: [
-          "The simplest interpreter walks the AST: `eval(node)` looks at the node type and recurses into its children. It's easy to write and slow to run. Every node is a separate heap allocation, every step follows a pointer, and the CPU cache keeps missing.",
-          "Bytecode flattens the tree into a dense array of bytes. Execution becomes a loop that reads the next byte, jumps to its handler and repeats. That access pattern is cache-friendly and predictable, and it's usually several times faster than walking the tree.",
-        ],
-      },
-      {
-        heading: "Compile ahead of time, or at load time?",
-        body: [
-          "Java compiles ahead of time with `javac` and ships the bytecode. Scripting languages like Lua and Python compile inside the VM when a script loads. That takes milliseconds, so the user never notices.",
-          "You can do both. Compile on load, and optionally cache the compiled bytecode to disk the way CPython writes `.pyc` files. Give the format a magic number and a version, the way class files start with `0xCAFEBABE`.",
+          "Compile a tiny Java method and disassemble it with `javap -c`. You'll see four instructions. Two load the arguments onto the operand stack, one adds the top two values, and one returns the result. Your VM will run almost exactly this sequence.",
         ],
         code: {
           lang: "text",
-          caption: "A header for your serialized bytecode",
-          code: `magic    : u32  = 0x57495350   // "WISP"
-version  : u16  = 1
-consts   : u32 count, then tagged values
-functions: u32 count, then { arity, upvalues, code_len, code[], lines[] }`,
+          caption: "javap -c Add.class",
+          code: `static int add(int, int);
+  Code:
+     0: iload_0      // push local 0 (a)
+     1: iload_1      // push local 1 (b)
+     2: iadd         // pop two ints, push their sum
+     3: ireturn      // return the top of the stack`,
+        },
+      },
+      {
+        heading: "Why compile to bytecode instead of walking the tree?",
+        body: [
+          "The simplest interpreter walks the syntax tree: `eval(node)` checks the node type and recurses into its children. It's easy to write but slow to run, because every node is a separate allocation and every step chases a pointer.",
+          "Bytecode flattens the tree into one dense array. Running it is a loop that reads the next instruction, does it, and repeats. The loop is short and predictable, and it usually runs several times faster than a tree walker. It's the same reason the JVM doesn't run Java syntax trees.",
+        ],
+      },
+      {
+        heading: "The Wisp language in one screen",
+        body: [
+          "Wisp is small on purpose. There are no classes. Objects are plain **tables** of fields, and behaviour comes from functions and closures. This program uses everything the course builds, except modules and fibers.",
+        ],
+        code: {
+          lang: "wisp",
+          caption: "everything.wisp",
+          code: `let greeting = "hello, " + "wisp"
+print greeting
+
+fn fib(n) {
+  if n < 2 { return n }
+  return fib(n - 1) + fib(n - 2)
+}
+print fib(20)
+
+fn make_counter() {
+  let count = 0
+  return fn() { count = count + 1  return count }
+}
+let next = make_counter()
+next()
+print next()
+
+let point = { x: 3, y: 4 }
+point.x = 10
+print point.x + point.y`,
         },
       },
     ],
     build: {
-      intro: "Wire up the whole pipeline first, even with stub stages. A runnable skeleton is worth more than one perfect stage.",
+      intro: "Set up the project and the pipeline. Some stages will be empty for a few lessons, and that's fine. Having a skeleton that compiles and runs early makes every later lesson a small, testable step.",
+      milestone: "a Rust crate called `wisp` that reads a `.wisp` file and passes it through a four-stage pipeline: lex, parse, compile, run.",
       steps: [
         {
-          title: "Define the four stages as plain functions",
-          body: "Each stage takes the previous stage's output and returns a `Result`, so errors can come from any phase.",
+          title: "Create the crate and the module layout",
+          body: "One file per stage keeps each lesson's changes in one place. Create these empty files now. Each lesson tells you which file it adds to.",
+          code: {
+            lang: "text",
+            caption: "terminal",
+            code: `cargo new wisp
+cd wisp
+touch src/lexer.rs src/ast.rs src/parser.rs     // lesson 02: text -> tree
+touch src/value.rs src/chunk.rs                 // lesson 03: the bytecode format
+touch src/vm.rs                                 // lesson 04: runs bytecode
+touch src/compiler.rs                           // lesson 05: tree -> bytecode
+touch src/object.rs                             // lesson 06: heap objects`,
+          },
+          explain: [
+            "There are no external dependencies. Everything in this course uses only Rust's standard library, so you can see every line that runs.",
+            "The split mirrors the JDK: `javac` is the front end and compiler, `java` is the VM. Here they're modules in one binary, but they only talk through plain data types (`Vec<Token>`, `Vec<Stmt>`, `Chunk`).",
+          ],
+        },
+        {
+          title: "Write main.rs: read a file and run the pipeline",
+          body: "`run` is the whole compiler and VM in four lines. Each stage returns a `Result`, so `?` stops at the first error from any stage.",
           code: {
             lang: "rust",
-            code: `pub fn run(src: &str, vm: &mut Vm) -> Result<Value, WispError> {
-    let tokens = lexer::lex(src)?;           // text   -> tokens
-    let ast    = parser::parse(&tokens)?;     // tokens -> tree
-    let func   = compiler::compile(&ast)?;    // tree   -> bytecode
-    vm.interpret(func)                        // bytecode -> result
+            caption: "src/main.rs",
+            code: `mod ast;
+mod chunk;
+mod compiler;
+mod lexer;
+mod object;
+mod parser;
+mod value;
+mod vm;
+
+use std::{env, fs, process};
+
+fn main() {
+    // Usage: wisp path/to/script.wisp
+    let Some(path) = env::args().nth(1) else {
+        eprintln!("usage: wisp <file.wisp>");
+        process::exit(64);
+    };
+    let source = fs::read_to_string(&path).expect("could not read the file");
+
+    if let Err(message) = run(&source) {
+        eprintln!("{message}");
+        process::exit(70);
+    }
+}
+
+/// The whole pipeline. Every stage returns Result<_, String>,
+/// so \`?\` stops at the first error, whichever stage it came from.
+fn run(source: &str) -> Result<(), String> {
+    let tokens = lexer::lex(source)?;          // "let x = 1"  ->  [Let, Ident(x), Eq, Num(1)]
+    let program = parser::parse(tokens)?;      // tokens       ->  Vec<Stmt> (the AST)
+    let chunk = compiler::compile(&program)?;  // AST          ->  bytecode
+    vm::Vm::new().run(&chunk)                  // bytecode     ->  side effects (print!)
 }`,
           },
+          explain: [
+            "`env::args().nth(1)` is the first argument after the program name. `let ... else` exits early when it's missing.",
+            "Errors are plain `String`s that already contain a line number, such as `[line 3] unexpected ')'`. That's enough for a learning VM, and it keeps every signature short.",
+            "`run` returns as soon as any stage fails, the same way `javac` refuses to write a `.class` file when parsing fails.",
+            "Exit codes 64 and 70 are the conventional \"usage error\" and \"internal error\" codes from `sysexits.h`. Any non-zero code works.",
+          ],
+          jvm: "`java Main` does the same thing in a different order. The launcher finds `Main.class`, the class loader reads its bytes, the verifier checks them, and the interpreter starts running `main`. Compiling already happened earlier, when you ran `javac`.",
         },
         {
-          title: "Make bytecode a first-class artifact",
-          body: "Add a `--dump` flag that prints the disassembled bytecode. You'll use it constantly, the same way Java developers use `javap -c`.",
-        },
-        {
-          title: "Keep the VM independent of the compiler",
-          body: "The VM should accept any `Function` object. Later you can load cached bytecode, or a second front end, without touching the interpreter.",
+          title: "Add the test script you'll grow into",
+          body: "Save the Wisp program from above as `everything.wisp`. It won't run yet. Each lesson makes more of it work, and by lesson 08 the whole file runs.",
+          explain: [
+            "Write a one-line script for each feature as you add it, too. A folder of tiny `.wisp` files with their expected output is the simplest test suite a VM can have, and it's how real VMs are tested.",
+          ],
         },
       ],
     },
     questions: [
       {
-        q: "If the AST already describes the program, why add bytecode at all?",
+        q: "If the syntax tree already describes the program, why add bytecode at all?",
         intuition:
-          "A recipe written as a family tree of sub-recipes is accurate but awkward to follow while cooking. Bytecode is the same recipe rewritten as a numbered checklist you read from top to bottom.",
+          "A recipe written as a family tree of sub-recipes is complete but awkward to follow while you cook. Bytecode is the same recipe rewritten as a numbered checklist you read from top to bottom.",
         technical:
-          "Tree-walking costs a virtual dispatch and a pointer chase per node, and the nodes are scattered across the heap. Bytecode is a contiguous `Vec<u8>`, dispatch is one indexed jump, and operands sit right next to their opcode. The array also gives you a natural place for jump offsets, line tables and inline caches.",
+          "Walking a tree costs a branch and a pointer chase per node, and the nodes are scattered across memory. Bytecode is a contiguous array, so each step is an index and a jump. The array also gives you natural places for jump targets, line tables and caches.",
       },
       {
-        q: "What actually makes Java portable: the language or the VM?",
+        q: "What makes Java portable: the language or the VM?",
         intuition:
-          "Neither alone. The portable part is the bytecode, which works like a universal plug shape. Every OS gets its own native JVM, the adapter, that accepts that plug.",
+          "The bytecode. Think of it as a standard plug shape. Every operating system gets its own native JVM, an adapter that accepts that plug.",
         technical:
-          "The JVM Specification pins down the class-file format and the semantics of every opcode, including byte order (big-endian) and integer widths. For your VM to be portable, serialize multi-byte operands in a fixed byte order and never write native pointer sizes into the format.",
+          "The JVM Specification fixes the class-file format and the meaning of every opcode, down to byte order and integer widths. Any program that emits valid class files, from any language, runs on any conforming JVM.",
       },
       {
-        q: "Does Java get compiled twice?",
-        intuition: "Yes. It's compiled once for portability (source to bytecode) and again for speed (bytecode to machine code) for the parts that run often.",
+        q: "Is Java compiled or interpreted?",
+        intuition: "Both. It's compiled once for portability (source to bytecode), then interpreted, and then compiled again for speed (bytecode to machine code) for the parts that run often.",
         technical:
-          "`javac` performs AOT compilation to bytecode. At runtime HotSpot interprets first, profiles, then uses C1 and C2 to compile hot methods to native code. The profile data from the interpreter is what makes the second compilation smart.",
+          "`javac` compiles to bytecode ahead of time. At runtime HotSpot interprets first and profiles as it goes, then the C1 and C2 JIT compilers turn hot methods into native code. Our VM stops at the interpreter. The JIT lesson explains what comes after it.",
       },
     ],
+    references: [
+      ci("A Bytecode Virtual Machine", "a-bytecode-virtual-machine", "The best free book on this exact topic. Its C VM, clox, inspired much of Wisp's design."),
+      jvms("The Structure of the JVM", "jvms-2.html", "Chapter 2: the runtime data areas, frames and the instruction set at a glance."),
+    ],
   },
+
+  /* ───────────────────────────── 02 · Front end (quickshot) ───────────────────────────── */
   {
     slug: "front-end",
-    title: "Lexing, Parsing & ASTs",
+    title: "Lexer & Parser, Fast",
     level: "Foundational",
     accent: "violet",
     icon: "Braces",
-    summary: "Turn raw text into a tree your compiler can reason about. This is where `javac` spends its first steps.",
-    tags: ["Tokens", "Pratt Parsing", "AST Design", "Error Recovery"],
+    summary: "A quick, complete lexer and Pratt parser that turn Wisp source into a syntax tree, with links to longer videos if you want the deep dive.",
+    tags: ["Tokens", "Pratt parsing", "AST", "Quickshot"],
     intro: [
-      "Before any bytecode exists, text has to become structure. `javac` scans characters into tokens, parses the tokens into a syntax tree, checks types on that tree, desugars it, and only then generates bytecode. The JVM never sees any of this. It only sees the result.",
-      "Wisp is dynamically typed and has no classes, so your front end is much smaller. You still need the same three ideas: tokens with source positions, a parser that handles operator precedence, and an AST that is easy to compile.",
+      "Before there's any bytecode, text has to become structure. This part of the course is deliberately short. Lexers and parsers are covered very well elsewhere, so the videos linked below are worth watching if this is your first one. Here you get a small, complete front end you can copy, read once, and move on from.",
+      "Everything after this lesson only needs the output: a `Vec<Stmt>`, the **abstract syntax tree** (AST). That's where the VM part of the course really starts.",
+    ],
+    references: [
+      {
+        title: "Implementing a Lox interpreter in Rust",
+        by: "Jon Gjengset",
+        url: "https://youtu.be/mNOLaw-_Buc",
+        kind: "video",
+        note: "A long live-coding session that builds a lexer and parser in idiomatic Rust, with lots of commentary on why.",
+      },
+      {
+        title: "Build a Custom Scripting Language in TypeScript",
+        by: "tylerlaceby",
+        url: "https://youtube.com/playlist?list=PL_2VhOvlMk4UHGqYCLWc6GO8FaPl8fQTh",
+        kind: "playlist",
+        note: "A beginner-friendly series: tokens, the AST and parsing explained step by step. The ideas carry straight over to Rust.",
+      },
+      {
+        title: "Simple but Powerful Pratt Parsing",
+        by: "Alex Kladov (matklad)",
+        url: "https://matklad.github.io/2020/04/13/simple-but-powerful-pratt-parsing.html",
+        kind: "article",
+        note: "The clearest explanation of the binding-power loop used below, written in Rust.",
+      },
+      ci("Scanning", "scanning", "A gentle chapter on lexers, if you prefer reading."),
     ],
     sim: "flow",
     simTitle: "The front-end pipeline",
     flow: [
       { label: "Source", sub: "let x = 1 + 2 * 3" },
-      { label: "Tokens", sub: "LET IDENT EQ NUM PLUS…" },
+      { label: "Tokens", sub: "Let Ident Eq Num Plus…" },
       { label: "AST", sub: "Let(x, Add(1, Mul(2,3)))" },
-      { label: "Resolver", sub: "x → local slot 0" },
-      { label: "Compiler", sub: "emit bytecode" },
+      { label: "Compiler", sub: "next lessons" },
     ],
     jvm: {
       title: "What javac teaches us",
       points: [
-        "Front end and back end are separate phases: parse, attribute, flow-check, desugar, then generate. Each phase does one job well.",
-        "Desugaring is cheap leverage. Java rewrites enhanced `for`, string `+` and lambdas into simpler forms before generating code.",
-        "Source positions survive into bytecode as the `LineNumberTable`. That's why Java stack traces show line numbers.",
-        "Scope resolution happens at compile time. By the time code runs, a local variable is just a slot index, never a name.",
+        "`javac` runs the same stages: scan characters into tokens, parse tokens into a tree, then check, desugar and generate bytecode. The JVM never sees any of it, only the finished class file.",
+        "Tokens remember where they came from. The line numbers end up in the class file's `LineNumberTable`, which is why Java stack traces can show line numbers.",
+        "Java's parser is recursive descent with precedence rules, like ours. Java's grammar is much larger, but the technique is the same.",
       ],
     },
     concepts: [
       {
-        heading: "Tokens carry their position",
+        heading: "The whole idea in two sentences",
         body: [
-          "A token is a kind plus a span: `{ kind: Number, start: 14, len: 1, line: 2 }`. Don't copy strings into tokens. Slice the source when you need the text. Spans are what turn error messages from \"syntax error\" into a caret under the exact character.",
-        ],
-      },
-      {
-        heading: "Pratt parsing for expressions",
-        body: [
-          "Recursive descent with one function per precedence level gets verbose quickly. A Pratt parser gives each operator a binding power and runs one loop: parse a prefix, then keep absorbing infix operators that bind tighter than the current level.",
-          "Adding a new operator becomes a one-line table entry instead of a new grammar function.",
-        ],
-        code: {
-          lang: "rust",
-          caption: "The core Pratt loop",
-          code: `fn expr(&mut self, min_bp: u8) -> Result<Expr> {
-    let mut lhs = self.prefix()?;
-    while let Some((l_bp, r_bp)) = infix_power(self.peek()) {
-        if l_bp < min_bp { break; }
-        let op = self.advance();
-        let rhs = self.expr(r_bp)?;
-        lhs = Expr::Binary(Box::new(lhs), op, Box::new(rhs));
-    }
-    Ok(lhs)
-}`,
-        },
-      },
-      {
-        heading: "Recover, don't stop",
-        body: [
-          "When the parser hits an error, record it and skip forward to a safe point, usually the next statement keyword or `;`, then continue parsing. That way one run reports every mistake instead of only the first.",
+          "The **lexer** groups characters into words: `let`, `x`, `=`, `1`. The **parser** groups words into a tree that captures meaning, so `1 + 2 * 3` becomes `Add(1, Mul(2, 3))` because `*` binds tighter than `+`.",
+          "The only tricky part is precedence, and a Pratt parser solves it with one number per operator, its **binding power**. Higher numbers bind tighter.",
         ],
       },
     ],
     build: {
-      intro: "Use a small AST built from Rust enums. Every node should carry a span.",
+      intro: "Three files, roughly 220 lines in all. Skim the comments, copy the code, and check it with the debug print at the end.",
+      milestone: "`parser::parse(lexer::lex(src)?)` returns a `Vec<Stmt>` for any Wisp program in this course.",
       steps: [
         {
-          title: "Model the tree as enums",
-          body: "Wisp needs no class declarations. Functions, objects and closures are all expressions.",
+          title: "Tokens and the lexer",
+          body: "The lexer walks the source one character at a time and emits a `Token` (a kind plus a line number) for each word or symbol. It skips spaces, newlines and `#` comments.",
           code: {
             lang: "rust",
-            code: `pub enum Expr {
-    Num(f64), Str(Rc<str>), Bool(bool), Nil,
-    Var(Sym),
-    Binary(Box<Expr>, BinOp, Box<Expr>),
-    Call(Box<Expr>, Vec<Expr>),
-    Fn { params: Vec<Sym>, body: Vec<Stmt> },
-    Object(Vec<(Sym, Expr)>),          // { name: "wisp", age: 1 }
-    Get(Box<Expr>, Sym),
+            caption: "src/lexer.rs",
+            code: `#[derive(Debug, Clone, PartialEq)]
+pub enum Tok {
+    // literals carry their value
+    Num(f64), Str(String), Ident(String),
+    // keywords
+    Let, Fn, Return, If, Else, While, Print, And, Or, True, False, Nil,
+    // punctuation and operators
+    LParen, RParen, LBrace, RBrace, Comma, Dot, Colon,
+    Plus, Minus, Star, Slash, Bang, Eq, EqEq, BangEq, Lt, LtEq, Gt, GtEq,
+    Eof, // "end of input", so the parser never runs off the end
+}
+
+#[derive(Debug, Clone)]
+pub struct Token {
+    pub tok: Tok,
+    pub line: u32, // kept for error messages and, later, the line table
+}
+
+pub fn lex(src: &str) -> Result<Vec<Token>, String> {
+    let chars: Vec<char> = src.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0; // index of the current character
+    let mut line = 1;
+
+    while i < chars.len() {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied().unwrap_or('\\0'); // one char of lookahead
+        let tok = match c {
+            '\\n' => { line += 1; i += 1; continue; }
+            ' ' | '\\t' | '\\r' => { i += 1; continue; }
+            '#' => { // a comment runs to the end of the line
+                while i < chars.len() && chars[i] != '\\n' { i += 1; }
+                continue;
+            }
+            '(' => Tok::LParen, ')' => Tok::RParen,
+            '{' => Tok::LBrace, '}' => Tok::RBrace,
+            ',' => Tok::Comma, '.' => Tok::Dot, ':' => Tok::Colon,
+            '+' => Tok::Plus, '-' => Tok::Minus, '*' => Tok::Star, '/' => Tok::Slash,
+            // two-character operators: look at \`next\`, and skip it if it matches
+            '=' if next == '=' => { i += 1; Tok::EqEq }
+            '!' if next == '=' => { i += 1; Tok::BangEq }
+            '<' if next == '=' => { i += 1; Tok::LtEq }
+            '>' if next == '=' => { i += 1; Tok::GtEq }
+            '=' => Tok::Eq, '!' => Tok::Bang, '<' => Tok::Lt, '>' => Tok::Gt,
+            '"' => {
+                let start = i + 1;
+                i += 1;
+                while i < chars.len() && chars[i] != '"' {
+                    if chars[i] == '\\n' { line += 1; }
+                    i += 1;
+                }
+                if i == chars.len() {
+                    return Err(format!("[line {line}] unterminated string"));
+                }
+                Tok::Str(chars[start..i].iter().collect()) // i is on the closing quote
+            }
+            c if c.is_ascii_digit() => {
+                let start = i;
+                while i + 1 < chars.len() && (chars[i + 1].is_ascii_digit() || chars[i + 1] == '.') {
+                    i += 1;
+                }
+                let text: String = chars[start..=i].iter().collect();
+                Tok::Num(text.parse().map_err(|_| format!("[line {line}] bad number {text}"))?)
+            }
+            c if c.is_alphabetic() || c == '_' => {
+                let start = i;
+                while i + 1 < chars.len() && (chars[i + 1].is_alphanumeric() || chars[i + 1] == '_') {
+                    i += 1;
+                }
+                let word: String = chars[start..=i].iter().collect();
+                keyword(&word).unwrap_or(Tok::Ident(word))
+            }
+            other => return Err(format!("[line {line}] unexpected character '{other}'")),
+        };
+        out.push(Token { tok, line });
+        i += 1; // step past the token's last character
+    }
+    out.push(Token { tok: Tok::Eof, line });
+    Ok(out)
+}
+
+fn keyword(word: &str) -> Option<Tok> {
+    Some(match word {
+        "let" => Tok::Let, "fn" => Tok::Fn, "return" => Tok::Return,
+        "if" => Tok::If, "else" => Tok::Else, "while" => Tok::While,
+        "print" => Tok::Print, "and" => Tok::And, "or" => Tok::Or,
+        "true" => Tok::True, "false" => Tok::False, "nil" => Tok::Nil,
+        _ => return None, // not a keyword: it's a name
+    })
 }`,
           },
+          explain: [
+            "Every branch of the `match` ends with `i` on the **last** character of its token. The shared `i += 1` after the `match` then moves past it. Multi-character tokens advance `i` inside their branch, and whitespace uses `continue` to skip the push.",
+            "Keywords are lexed exactly like names, then looked up in `keyword()`. That's simpler than a separate rule per keyword, and it's how most real lexers do it.",
+            "Newlines are just whitespace in Wisp, so statements don't need semicolons. The parser can tell where a statement ends because an expression can't continue past it.",
+          ],
         },
         {
-          title: "Add a resolver pass",
-          body: "Walk the tree once to decide whether each variable is local, captured (an upvalue) or global. The compiler then becomes straightforward code emission.",
+          title: "The AST: two enums",
+          body: "`Expr` is anything that produces a value, and `Stmt` is anything that's run for its effect. Nodes that can fail at runtime keep a line number, so later error messages can point at the source.",
+          code: {
+            lang: "rust",
+            caption: "src/ast.rs",
+            code: `use crate::lexer::Tok;
+
+#[derive(Debug)]
+pub enum Expr {
+    Num(f64),
+    Str(String),
+    Bool(bool),
+    Nil,
+    Var(String, u32),                        // x
+    Assign(String, Box<Expr>, u32),          // x = value
+    Unary(Tok, Box<Expr>, u32),              // -x   !x
+    Binary(Box<Expr>, Tok, Box<Expr>, u32),  // a + b   a < b
+    Logical(Box<Expr>, Tok, Box<Expr>),      // a and b   a or b
+    Call(Box<Expr>, Vec<Expr>, u32),         // f(a, b)
+    Lambda(Vec<String>, Vec<Stmt>),          // fn(a) { ... }       (lesson 08)
+    Table(Vec<(String, Expr)>),              // { x: 1, y: 2 }      (lesson 06)
+    Get(Box<Expr>, String, u32),             // obj.field
+    Set(Box<Expr>, String, Box<Expr>, u32),  // obj.field = value
+}
+
+#[derive(Debug)]
+pub enum Stmt {
+    Let(String, Expr),                       // let x = expr
+    Expr(Expr),                              // f(x)  (value is thrown away)
+    Print(Expr),                             // print expr
+    Block(Vec<Stmt>),                        // { ... }
+    If(Expr, Vec<Stmt>, Option<Vec<Stmt>>),  // if c { } else { }
+    While(Expr, Vec<Stmt>),                  // while c { }
+    Fn(String, Vec<String>, Vec<Stmt>),      // fn name(a, b) { }   (lesson 07)
+    Return(Option<Expr>),                    // return expr
+}`,
+          },
+          explain: [
+            "`Box<Expr>` is needed because an enum can't contain itself directly. Its size would be infinite. A `Box` is a pointer, so the size is fixed.",
+            "Some variants are only used in later lessons. They're defined now so the parser can be written once and never touched again.",
+          ],
         },
         {
-          title: "Desugar early",
-          body: "Lower `for x in xs` into a `while` loop over an iterator, and compound assignment `a += 1` into `a = a + 1`. Each construct you desugar is one less construct the compiler has to handle.",
+          title: "The parser: statements, then a Pratt loop for expressions",
+          body: "Statements are easy: look at the first token and pick a rule. Expressions use the Pratt loop. Parse one operand, then keep absorbing operators while they bind tighter than the caller's minimum.",
+          code: {
+            lang: "rust",
+            caption: "src/parser.rs",
+            code: `use crate::ast::{Expr, Stmt};
+use crate::lexer::{Tok, Token};
+
+pub fn parse(tokens: Vec<Token>) -> Result<Vec<Stmt>, String> {
+    let mut p = Parser { tokens, pos: 0 };
+    let mut program = Vec::new();
+    while *p.peek() != Tok::Eof {
+        program.push(p.statement()?);
+    }
+    Ok(program)
+}
+
+struct Parser { tokens: Vec<Token>, pos: usize }
+
+impl Parser {
+    // ── helpers ──
+    fn peek(&self) -> &Tok { &self.tokens[self.pos].tok }
+    fn line(&self) -> u32 { self.tokens[self.pos].line }
+    fn advance(&mut self) -> Tok {
+        let t = self.tokens[self.pos].tok.clone();
+        if t != Tok::Eof { self.pos += 1; }
+        t
+    }
+    fn eat(&mut self, t: Tok) -> bool { // consume \`t\` if it's next
+        if *self.peek() == t { self.pos += 1; true } else { false }
+    }
+    fn expect(&mut self, t: Tok, what: &str) -> Result<(), String> {
+        if self.eat(t) { Ok(()) } else { Err(format!("[line {}] expected {what}", self.line())) }
+    }
+    fn name(&mut self) -> Result<String, String> {
+        match self.advance() {
+            Tok::Ident(n) => Ok(n),
+            _ => Err(format!("[line {}] expected a name", self.line())),
+        }
+    }
+
+    // ── statements ──
+    fn statement(&mut self) -> Result<Stmt, String> {
+        match self.peek() {
+            Tok::Let => {
+                self.advance();
+                let name = self.name()?;
+                self.expect(Tok::Eq, "'='")?;
+                Ok(Stmt::Let(name, self.expr(0)?))
+            }
+            Tok::Print => { self.advance(); Ok(Stmt::Print(self.expr(0)?)) }
+            Tok::LBrace => Ok(Stmt::Block(self.block()?)),
+            Tok::If => self.if_stmt(),
+            Tok::While => {
+                self.advance();
+                let cond = self.expr(0)?;
+                Ok(Stmt::While(cond, self.block()?))
+            }
+            Tok::Fn => {
+                self.advance();
+                let name = self.name()?;
+                let (params, body) = self.fn_rest()?;
+                Ok(Stmt::Fn(name, params, body))
+            }
+            Tok::Return => {
+                self.advance();
+                // a bare \`return\` right before \`}\` returns nil
+                let value = if *self.peek() == Tok::RBrace { None } else { Some(self.expr(0)?) };
+                Ok(Stmt::Return(value))
+            }
+            _ => Ok(Stmt::Expr(self.expr(0)?)),
+        }
+    }
+
+    fn block(&mut self) -> Result<Vec<Stmt>, String> {
+        self.expect(Tok::LBrace, "'{'")?;
+        let mut body = Vec::new();
+        while *self.peek() != Tok::RBrace && *self.peek() != Tok::Eof {
+            body.push(self.statement()?);
+        }
+        self.expect(Tok::RBrace, "'}'")?;
+        Ok(body)
+    }
+
+    fn if_stmt(&mut self) -> Result<Stmt, String> {
+        self.advance(); // 'if'
+        let cond = self.expr(0)?;
+        let then = self.block()?;
+        let otherwise = if self.eat(Tok::Else) {
+            // \`else if\` is just an else-block holding one more if
+            if *self.peek() == Tok::If { Some(vec![self.if_stmt()?]) } else { Some(self.block()?) }
+        } else {
+            None
+        };
+        Ok(Stmt::If(cond, then, otherwise))
+    }
+
+    /// \`(a, b) { body }\`, shared by \`fn name(...)\` and anonymous \`fn(...)\`.
+    fn fn_rest(&mut self) -> Result<(Vec<String>, Vec<Stmt>), String> {
+        self.expect(Tok::LParen, "'('")?;
+        let mut params = Vec::new();
+        if *self.peek() != Tok::RParen {
+            loop {
+                params.push(self.name()?);
+                if !self.eat(Tok::Comma) { break; }
+            }
+        }
+        self.expect(Tok::RParen, "')'")?;
+        Ok((params, self.block()?))
+    }
+
+    // ── expressions: the Pratt loop ──
+
+    /// How tightly an infix operator binds. None means "not an infix operator".
+    fn binding_power(t: &Tok) -> Option<u8> {
+        Some(match t {
+            Tok::Eq => 1,                                    // a = b   (lowest)
+            Tok::Or => 2,
+            Tok::And => 3,
+            Tok::EqEq | Tok::BangEq => 4,
+            Tok::Lt | Tok::LtEq | Tok::Gt | Tok::GtEq => 5,
+            Tok::Plus | Tok::Minus => 6,
+            Tok::Star | Tok::Slash => 7,
+            Tok::LParen | Tok::Dot => 9,                     // f(x)  a.b  (highest)
+            _ => return None,
+        })
+    }
+
+    /// Parse an expression whose operators all bind tighter than \`min_bp\`.
+    fn expr(&mut self, min_bp: u8) -> Result<Expr, String> {
+        let line = self.line();
+
+        // 1. Prefix: every expression starts with one of these.
+        let mut lhs = match self.advance() {
+            Tok::Num(n) => Expr::Num(n),
+            Tok::Str(s) => Expr::Str(s),
+            Tok::True => Expr::Bool(true),
+            Tok::False => Expr::Bool(false),
+            Tok::Nil => Expr::Nil,
+            Tok::Ident(name) => Expr::Var(name, line),
+            Tok::LParen => {
+                let inner = self.expr(0)?; // parentheses reset precedence to the lowest level
+                self.expect(Tok::RParen, "')'")?;
+                inner
+            }
+            op @ (Tok::Minus | Tok::Bang) => Expr::Unary(op, Box::new(self.expr(8)?), line),
+            Tok::LBrace => self.table()?,
+            Tok::Fn => {
+                let (params, body) = self.fn_rest()?;
+                Expr::Lambda(params, body)
+            }
+            t => return Err(format!("[line {line}] unexpected {t:?}")),
+        };
+
+        // 2. Infix: absorb operators while they bind tighter than min_bp.
+        loop {
+            let op = self.peek().clone();
+            let Some(bp) = Self::binding_power(&op) else { break };
+            if bp <= min_bp { break; } // too weak: let our caller have it
+            let line = self.line();
+            self.advance();
+            lhs = match op {
+                Tok::LParen => Expr::Call(Box::new(lhs), self.args()?, line),
+                Tok::Dot => Expr::Get(Box::new(lhs), self.name()?, line),
+                Tok::Eq => {
+                    // bp - 1 makes \`=\` right-associative: a = b = c  is  a = (b = c)
+                    let value = Box::new(self.expr(bp - 1)?);
+                    match lhs {
+                        Expr::Var(name, _) => Expr::Assign(name, value, line),
+                        Expr::Get(obj, field, _) => Expr::Set(obj, field, value, line),
+                        _ => return Err(format!("[line {line}] can't assign to that")),
+                    }
+                }
+                Tok::And | Tok::Or => Expr::Logical(Box::new(lhs), op, Box::new(self.expr(bp)?)),
+                _ => Expr::Binary(Box::new(lhs), op, Box::new(self.expr(bp)?), line),
+            };
+        }
+        Ok(lhs)
+    }
+
+    fn args(&mut self) -> Result<Vec<Expr>, String> {
+        let mut args = Vec::new();
+        if *self.peek() != Tok::RParen {
+            loop {
+                args.push(self.expr(0)?);
+                if !self.eat(Tok::Comma) { break; }
+            }
+        }
+        self.expect(Tok::RParen, "')'")?;
+        Ok(args)
+    }
+
+    fn table(&mut self) -> Result<Expr, String> { // \`{\` already consumed
+        let mut fields = Vec::new();
+        while *self.peek() != Tok::RBrace {
+            let key = self.name()?;
+            self.expect(Tok::Colon, "':'")?;
+            fields.push((key, self.expr(0)?));
+            if !self.eat(Tok::Comma) { break; }
+        }
+        self.expect(Tok::RBrace, "'}'")?;
+        Ok(Expr::Table(fields))
+    }
+}`,
+          },
+          explain: [
+            "Follow `1 + 2 * 3` through `expr(0)`. The prefix step reads `1`. The loop sees `+` with power 6, which is more than 0, so it parses the right side with `expr(6)`.",
+            "Inside `expr(6)`: the prefix step reads `2`. The loop sees `*` with power 7, which is more than 6, so it takes `* 3` too and returns `2 * 3`. That's how `*` ends up deeper in the tree than `+`.",
+            "If the input were `1 * 2 + 3`, then inside `expr(7)` the loop would see `+` (6 ≤ 7) and stop, handing `+` back to the outer level. One comparison, `bp <= min_bp`, handles all precedence and left-associativity.",
+            "Calls and `.` are infix operators with the highest power, which is why `a.b(c).d` chains naturally.",
+            "Assignment parses its left side as an ordinary expression, then checks it's something you can assign to. `x = 1` becomes `Assign`, `p.x = 1` becomes `Set`, and `1 = 2` is an error.",
+          ],
+        },
+        {
+          title: "Check it with a debug print",
+          body: "Temporarily print the tree from `run` in `main.rs`. If the nesting looks right, the front end is done. You won't need to change it again until the modules lesson adds one keyword.",
+          code: {
+            lang: "rust",
+            caption: "src/main.rs (temporary)",
+            code: `let program = parser::parse(lexer::lex("let x = 1 + 2 * 3")?)?;
+println!("{program:?}");`,
+          },
+          output: `[Let("x", Binary(Num(1.0), Plus, Binary(Num(2.0), Star, Num(3.0), 1), 1))]`,
+          explain: ["`Binary(Num(2.0), Star, Num(3.0))` sits inside the `Plus` node, so multiplication happens first. That's the precedence you wanted."],
         },
       ],
     },
     questions: [
       {
-        q: "Should I skip the AST and compile straight from the parser?",
+        q: "Why not parse straight into bytecode and skip the tree?",
         intuition:
-          "You can, the way a simultaneous interpreter translates without notes. It's fast, but you can't go back and improve a sentence you've already spoken.",
+          "You can, and Lua's compiler does. The tree is a pause point. It lets you look at the whole program before deciding what code to emit, which makes the compiler much easier to write and debug.",
         technical:
-          "Single-pass compilers like clox and early Lua avoid allocating a tree, but they make resolution, constant folding and closure capture analysis harder. Variable capture is the main problem, because you only learn a local is captured after you've already emitted code for it. For a learning VM, build the AST.",
+          "A single-pass compiler has to emit code while parsing, so jumps, scopes and constant folding all get tangled into the grammar code. With an AST, the parser only builds structure and the compiler only walks it. `javac` keeps a full tree and runs several passes over it.",
       },
       {
-        q: "Why does Pratt parsing handle precedence so neatly?",
+        q: "What does \"binding power\" actually mean?",
         intuition:
-          "Each operator has a grip strength. `*` grips its neighbours harder than `+`, so in `1 + 2 * 3` the `2` gets pulled toward the `*`.",
+          "Picture each operator pulling on the operands next to it. `*` pulls harder than `+`, so in `1 + 2 * 3` the `2` gets pulled toward the `*`.",
         technical:
-          "Binding powers come in pairs (left, right). Left-associative operators use (n, n+1) and right-associative ones use (n+1, n). The recursion `expr(r_bp)` only consumes operators whose left power is at least `min_bp`, and that is exactly the precedence-climbing rule.",
+          "`expr(min_bp)` only absorbs operators whose power is greater than `min_bp`. Parsing an operator's right side with that operator's own power makes it left-associative. Using `bp - 1`, as `=` does, makes it right-associative.",
       },
       {
-        q: "How do stack traces know line numbers?",
-        intuition: "The compiler leaves a breadcrumb next to each instruction that says which source line it came from.",
+        q: "How do I get better error messages than \"expected ')'\"?",
+        intuition: "Keep more position information: the column as well as the line. Then print the source line with a caret under the problem.",
         technical:
-          "The JVM stores a `LineNumberTable` that maps bytecode offsets to lines. You can do the same with run-length encoding: store `(offset, line)` pairs only where the line changes, then binary-search them when you build an error.",
+          "Store a span (start and length) in each token instead of only a line, and keep the source string around for error printing. For recovery, skip tokens until a likely statement start (`let`, `fn`, `}`) and keep parsing, so one typo doesn't hide the rest of the errors.",
       },
     ],
   },
+
+  /* ───────────────────────────── 03 · Bytecode ───────────────────────────── */
   {
     slug: "bytecode",
-    title: "Designing Bytecode",
+    title: "Values & Bytecode",
     level: "Foundational",
     accent: "cyan",
     icon: "Binary",
-    summary: "Choose a stack machine, define your opcodes, and step through execution one instruction at a time.",
-    tags: ["Operand Stack", "Opcodes", "Constant Pool", "Encoding"],
+    summary: "Design the VM's data: a Value type, an instruction set modelled on JVM opcodes, and a Chunk that holds code, constants and line numbers.",
+    tags: ["Value enum", "Opcodes", "Constant pool", "Disassembler"],
     intro: [
-      "The JVM is a stack machine. `iadd` takes no operands: it pops two ints and pushes their sum. Instructions are a single byte, with operands packed after them. This makes bytecode compact and easy for a compiler to emit, because compiling an expression is just a post-order walk of the tree.",
-      "Your instruction set is the most important design decision you'll make. It sets how the compiler, interpreter, debugger and any future JIT see the program. Start small, with about 30 opcodes, and use the stepper below to see exactly what each one does to the stack.",
+      "The bytecode format is the most important design decision in a VM. The compiler writes it and the interpreter reads it, so it's the contract in the middle. The JVM's version is the class file. Each method has a byte array of instructions, and the class has a **constant pool** that those instructions point into.",
+      "In this lesson you'll define Wisp's version: what a value is, which instructions exist, and the `Chunk` that holds a function's compiled code. You'll also write a disassembler, your own `javap`, so you can read what the compiler produces from now on.",
     ],
     sim: "bytecode",
-    simTitle: "Bytecode playground: step the operand stack",
+    simTitle: "Step through bytecode on an operand stack",
     jvm: {
       title: "What JVM bytecode teaches us",
       points: [
-        "One-byte opcodes give 256 possible instructions. The JVM uses about 200, which leaves room to grow.",
-        "Operands are inline. `bipush 7` stores the 7 right after the opcode, while `ldc #3` indexes into the constant pool.",
-        "Typed opcodes (`iadd`, `ladd`, `fadd`, `dadd`) let the verifier and JIT trust operand types without checking at runtime.",
-        "Each method records `max_stack` and `max_locals`, so the frame size is known before the method runs.",
+        "JVM opcodes are one byte each, so there are at most 256 of them (about 200 are used). Operands follow the opcode in the byte stream. `bipush 100` is the two bytes `10 64`.",
+        "Constants that don't fit in an instruction, such as big numbers, strings, and class and method names, live in the **constant pool**. Instructions refer to them by index, as in `ldc #7`.",
+        "The JVM has typed instructions: `iadd` for ints, `dadd` for doubles, and so on. Wisp is dynamically typed, so it has one `Add` that checks types at runtime instead.",
+        "Each method's `Code` attribute stores `max_stack` and `max_locals`, which the compiler calculates so the VM can size each frame up front.",
       ],
     },
     concepts: [
       {
-        heading: "Stack machine or register machine?",
+        heading: "A stack machine, like the JVM",
         body: [
-          "Stack machines (JVM, CPython, WebAssembly) produce small instructions and simple compilers. Register machines (Lua 5, Dalvik) name their operands, as in `ADD r2, r0, r1`. That means fewer instructions and less pushing and popping, but each instruction is wider and register allocation is harder.",
-          "For a first VM, use a stack machine. Once it works, see whether a register design or superinstructions fix your hot paths.",
+          "Instructions don't name their inputs. They pop them from an operand stack and push results back. `2 * (3 + 4)` becomes push 2, push 3, push 4, add, multiply. The tree's structure turns into instruction order.",
+          "The other design is a **register machine**, which Lua and Dalvik (Android) use. Instructions name their operands explicitly, as in `ADD r0, r1, r2`. That means fewer instructions, but each one is bigger and the compiler has to allocate registers. A stack machine is simpler to compile to, which is why the JVM chose it and why we will too.",
         ],
+        code: {
+          lang: "text",
+          caption: "javap -c for: int x = 2 * (3 + 4);",
+          code: `0: iconst_2        // push 2
+1: iconst_3        // push 3
+2: iconst_4        // push 4
+3: iadd            // 3 + 4  -> 7
+4: imul            // 2 * 7  -> 14
+5: istore_1        // pop into local slot 1 (x)`,
+        },
       },
       {
-        heading: "Untyped ops, tagged values",
+        heading: "Bytes or enums?",
         body: [
-          "Wisp is dynamic, so there's a single `ADD` that checks tags at runtime: number plus number adds, string plus string concatenates. Typed opcodes come back later in a different form: a quickened `ADD_NUM` that the interpreter rewrites in place after it sees numbers a few times.",
+          "The JVM packs instructions into a `byte[]`, and the interpreter decodes operands by hand. In Rust there's a simpler option with the same benefits: an `enum` whose variants carry their operands. With `u16` operands each `Op` is 4 bytes, so a `Vec<Op>` is still one dense, cache-friendly array, and `match` decodes the operands for you.",
+          "We'll use enums. If you want a real byte format later, to save compiled code to disk like a `.class` file, converting `Vec<Op>` to bytes is a short serializer.",
         ],
       },
     ],
     build: {
-      intro: "Define the instruction set, a chunk that stores it, and a disassembler, in that order.",
+      intro: "Two small files. Nothing runs yet, but by the end you can build bytecode by hand and print it.",
+      milestone: "a `Chunk` you can fill with instructions and constants, and a disassembler that prints it like `javap -c`.",
       steps: [
         {
-          title: "A byte-sized opcode enum",
-          body: "`#[repr(u8)]` makes each variant exactly one byte, so it can sit directly in `Vec<u8>`.",
+          title: "The Value type",
+          body: "A `Value` is anything a Wisp variable can hold. For now that's nil, booleans and numbers. Strings, tables and functions live on the heap and arrive in lesson 06 as one more variant.",
           code: {
             lang: "rust",
-            code: `#[repr(u8)]
+            caption: "src/value.rs",
+            code: `use std::fmt;
+
+/// A Wisp value. It's small (16 bytes) and Copy, so the VM can move
+/// values around freely without allocating.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Value {
+    Nil,
+    Bool(bool),
+    Num(f64), // all numbers are f64, as in JavaScript and Lua
+    // Obj(ObjRef) arrives in lesson 06
+}
+
+impl Value {
+    /// Wisp's truthiness rule: only \`nil\` and \`false\` count as false.
+    pub fn is_truthy(self) -> bool {
+        !matches!(self, Value::Nil | Value::Bool(false))
+    }
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Value::Nil => write!(f, "nil"),
+            Value::Bool(b) => write!(f, "{b}"),
+            Value::Num(n) => write!(f, "{n}"), // Rust prints 7.0 as "7"
+        }
+    }
+}`,
+          },
+          explain: [
+            "A Rust enum is a **tagged union**: a small tag saying which variant it is, plus room for the largest payload. That's 16 bytes here, and every value is the same size.",
+            "Deriving `Copy` matters. Pushing, popping and reading locals copy a value instead of cloning or allocating, which keeps the interpreter loop cheap.",
+            "Truthiness is a language design choice. Wisp follows Lua and Ruby, where `0` and `\"\"` are true. Choose your rule once and keep it in one function.",
+          ],
+          jvm: "The JVM has no single Value type. Its slots are untyped 32-bit words, and the *instruction* says how to read them: `iload` reads an int, `aload` reads a reference. The verifier proves ahead of time that every slot is used consistently. A dynamic language can't know types ahead of time, so the value has to carry its own tag.",
+        },
+        {
+          title: "The instruction set",
+          body: "Each variant is one instruction. The comments name the closest JVM instruction, so you can compare as you go. Later lessons add a few more, such as `Call`, `Closure` and `GetField`.",
+          code: {
+            lang: "rust",
+            caption: "src/chunk.rs",
+            code: `use crate::value::Value;
+
+/// One instruction. Operands live inside the variant, so the
+/// interpreter's \`match\` decodes them for free. Each Op is 4 bytes.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Op {
-    Const,        // u16 index into constants
-    Nil, True, False, Pop,
-    GetLocal, SetLocal,     // u8 slot
-    GetGlobal, SetGlobal,   // u16 name constant
-    Add, Sub, Mul, Div, Neg, Not, Eq, Lt,
-    Jump, JumpIfFalse, Loop, // u16 offset
-    Call,                   // u8 argc
-    Closure, GetUpvalue, SetUpvalue, CloseUpvalue,
-    GetProp, SetProp,       // u16 name + u16 cache slot
-    Return,
+    // ── constants ──                         JVM equivalent
+    Const(u16),       // push consts[i]          ldc #i
+    Nil,              // push nil                aconst_null
+    True,             // push true               iconst_1
+    False,            // push false              iconst_0
+
+    // ── stack shuffling ──
+    Pop,              // drop the top value      pop
+    Dup,              // copy the top value      dup
+
+    // ── variables ──
+    GetLocal(u16),    // push a local slot       iload / aload
+    SetLocal(u16),    // write a local slot      istore / astore
+    GetGlobal(u16),   // operand = name index    getstatic
+    SetGlobal(u16),   //                         putstatic
+    DefineGlobal(u16),
+
+    // ── arithmetic and comparison ──
+    Add, Sub, Mul, Div, // pop 2, push 1         dadd dsub dmul ddiv
+    Neg,              // -x                      dneg
+    Not,              // !x
+    Eq, Lt, Gt,       // pop 2, push a bool      dcmpg + if<cond>
+
+    // ── control flow (operands are absolute instruction indexes) ──
+    Jump(u16),        // ip = target             goto
+    JumpIfFalse(u16), // pop; if falsy jump      ifeq
+    Loop(u16),        // a backwards jump        goto (negative offset)
+
+    // ── misc ──
+    Print,            // pop and print           (a call to System.out.println)
+    Return,           // leave the function      return / areturn
 }`,
           },
+          explain: [
+            "There's no `Le` or `Ne`. The compiler turns `a <= b` into `Gt` followed by `Not`. A smaller instruction set means less interpreter code, and the JVM does the same thing (it has no `>=` for doubles either).",
+            "Jump targets are **absolute** indexes into the instruction list. That's simpler than the JVM's relative offsets. `u16` limits a function to 65,535 instructions, which happens to match the JVM's 64 KB limit on a method's code.",
+            "`Loop` behaves exactly like `Jump`. It's kept separate because a backwards jump is where a loop repeats, which is exactly where later lessons count hot loops and check for safepoints.",
+          ],
         },
         {
-          title: "A chunk holds code, constants and lines",
-          body: "Deduplicate constants the way the JVM constant pool does, so the same string literal is stored once.",
+          title: "The Chunk: code, constants and lines",
+          body: "A `Chunk` is one function's compiled form. It's the equivalent of a method's `Code` attribute plus the parts of the constant pool it uses.",
           code: {
             lang: "rust",
-            code: `pub struct Chunk {
-    pub code: Vec<u8>,
-    pub constants: Vec<Value>,
-    pub lines: Vec<(u32, u32)>, // (offset, line), run-length
+            caption: "src/chunk.rs (continued)",
+            code: `#[derive(Debug, Default)]
+pub struct Chunk {
+    pub code: Vec<Op>,      // the instructions
+    pub lines: Vec<u32>,    // lines[i] = source line of code[i]
+    pub consts: Vec<Value>, // the constant pool for values
+    pub names: Vec<String>, // the constant pool for global names
+}
+
+impl Chunk {
+    /// Append an instruction and return its index.
+    /// The compiler needs that index to patch jump targets later.
+    pub fn emit(&mut self, op: Op, line: u32) -> usize {
+        self.code.push(op);
+        self.lines.push(line);
+        self.code.len() - 1
+    }
+
+    /// Add a constant, reusing the slot if an equal one already exists.
+    pub fn add_const(&mut self, v: Value) -> u16 {
+        if let Some(i) = self.consts.iter().position(|c| *c == v) {
+            return i as u16;
+        }
+        self.consts.push(v);
+        (self.consts.len() - 1) as u16
+    }
+
+    /// Same idea for variable names used by the *Global instructions.
+    pub fn add_name(&mut self, name: &str) -> u16 {
+        if let Some(i) = self.names.iter().position(|n| n == name) {
+            return i as u16;
+        }
+        self.names.push(name.to_string());
+        (self.names.len() - 1) as u16
+    }
 }`,
           },
+          explain: [
+            "`lines` runs parallel to `code`: entry *i* is the source line of instruction *i*. It costs 4 bytes per instruction and gives every runtime error a line number. The JVM's `LineNumberTable` is a compressed version of the same thing.",
+            "Deduplicating constants means `x + 1 + 1` stores `1` only once. `javac` does the same, so each string or number appears in a class's constant pool only once.",
+            "Names get their own pool for now because `Value` has no strings yet. Lesson 06 shows how strings become ordinary constants.",
+          ],
+          jvm: "Run `javap -v` on any class and you'll see the constant pool printed as `#1 = Methodref`, `#2 = String`, `#7 = Utf8 hello`. Instructions such as `ldc #2` and `getstatic #3` point into it, just as `Const(k)` and `GetGlobal(k)` point into `consts` and `names`.",
         },
         {
-          title: "Write the disassembler now",
-          body: "A `javap -c` for your VM. Every bug you'll chase in later lessons is easier to see in disassembly.",
+          title: "A disassembler: your own javap",
+          body: "Before the VM or the compiler exists, write the tool that shows you what's in a chunk. You'll use it on every lesson from here on.",
+          code: {
+            lang: "rust",
+            caption: "src/chunk.rs (continued)",
+            code: `impl Chunk {
+    pub fn disassemble(&self, name: &str) {
+        println!("== {name} ==");
+        for (i, op) in self.code.iter().enumerate() {
+            // print the line only when it changes, so the output stays readable
+            let line = if i > 0 && self.lines[i] == self.lines[i - 1] {
+                "   |".to_string()
+            } else {
+                format!("{:4}", self.lines[i])
+            };
+            match op {
+                Op::Const(k) => println!("{i:04} {line}  Const {k:>4}   ; {:?}", self.consts[*k as usize]),
+                other => println!("{i:04} {line}  {other:?}"),
+            }
+        }
+    }
+}
+
+// Try it: build \`print 1 + 2 * 3\` by hand (in main.rs, temporarily).
+let mut c = Chunk::default();
+let (a, b, d) = (c.add_const(Value::Num(1.0)), c.add_const(Value::Num(2.0)), c.add_const(Value::Num(3.0)));
+for op in [Op::Const(a), Op::Const(b), Op::Const(d), Op::Mul, Op::Add, Op::Print, Op::Return] {
+    c.emit(op, 1);
+}
+c.disassemble("demo");`,
+          },
+          output: `== demo ==
+0000    1  Const    0   ; Num(1.0)
+0001    |  Const    1   ; Num(2.0)
+0002    |  Const    2   ; Num(3.0)
+0003    |  Mul
+0004    |  Add
+0005    |  Print
+0006    |  Return`,
+          explain: [
+            "`{:?}` on an `Op` prints the variant name and its operand, such as `GetLocal(1)`, so most instructions need no special formatting.",
+            "Notice the order: both multiplication operands are pushed before `Mul`, and `Add` comes last. That's postfix order, the same shape `javap` showed for `2 * (3 + 4)`.",
+          ],
         },
       ],
     },
     questions: [
       {
-        q: "Why does the JVM have separate iadd, ladd and dadd instead of one add?",
-        intuition: "Labelled jars are faster to use than unlabelled ones. You never have to open the lid to check what's inside.",
+        q: "Why does the JVM limit opcodes to one byte?",
+        intuition: "Small instructions mean small class files and more code fitting in the CPU cache. In 1995 Java was designed to be sent over slow networks, so size mattered a lot.",
         technical:
-          "Typed opcodes let the bytecode verifier prove type safety statically, and let the interpreter skip tag checks entirely. A dynamic language can't know types at compile time. Quickening and inline caches recover most of that speed at runtime by specializing on the types it actually observes.",
+          "One byte gives at most 256 opcodes. The JVM uses about 200, with a `wide` prefix for the rare cases that need bigger operands. Short forms like `iload_0` to `iload_3` exist because the most common operands are worth encoding inside the opcode itself.",
       },
       {
-        q: "u8 or u16 for constant indices?",
-        intuition: "A short index saves bytes, but you'll eventually run out of numbers.",
+        q: "Why does Wisp need a constant pool at all? Couldn't `Const` hold an f64 directly?",
+        intuition: "It could for numbers, but strings and functions don't fit in an instruction. A pool gives every kind of constant one uniform home that instructions can point to.",
         technical:
-          "The JVM has `ldc` (u8 index) and `ldc_w` (u16 index). Do the same: emit the short form when the index fits and a wide form otherwise. Or use u16 everywhere at first. You can optimize the encoding once you have a disassembler and real programs to measure.",
+          "An f64 operand would make every `Op` 16 bytes instead of 4, so the whole array would be four times larger and less cache-friendly. The pool also deduplicates repeated constants and is where the compiler puts nested functions (lesson 07).",
       },
       {
-        q: "How many opcodes should I start with?",
-        intuition: "Enough to write fizzbuzz and a recursive fib, and no more.",
+        q: "Stack machine or register machine: which is faster?",
+        intuition: "Register machines run fewer instructions, so each program does less dispatch work. Stack machines are simpler to compile to and produce smaller code.",
         technical:
-          "About 30 cover constants, locals, globals, arithmetic, comparison, jumps, calls, closures, properties and return. Add specialized opcodes only when a profiler shows a hot pattern, such as `ADD_CONST` for `i + 1` or `GET_LOCAL_0`.",
+          "Studies of Lua 5 and of register-based JVM variants found roughly 30–45% fewer instructions with registers, but each instruction is larger and decodes more operands. For a first VM, a stack machine's simpler compiler is worth much more than that difference, and a JIT erases it anyway.",
       },
     ],
+    references: [
+      ci("Chunks of Bytecode", "chunks-of-bytecode", "The same design in C, with a byte-level encoding."),
+      jvms("The Instruction Set", "jvms-6.html", "Chapter 6: every JVM opcode, its operands and its stack effect."),
+    ],
   },
+
+  /* ───────────────────────────── 04 · The interpreter loop ───────────────────────────── */
+  {
+    slug: "execution-engine",
+    title: "The Interpreter Loop",
+    level: "Foundational",
+    accent: "emerald",
+    icon: "Zap",
+    summary: "Write the heart of the VM: an operand stack and a fetch–decode–execute loop that runs bytecode, modelled on the JVM interpreter.",
+    tags: ["Operand stack", "Instruction pointer", "Dispatch", "Runtime errors"],
+    intro: [
+      "Every JVM thread runs a loop that fetches the instruction at the program counter, works out which operation it is, does it, and repeats. HotSpot's version is generated machine code tuned for each CPU, but the shape is the same as the loop you'll write here in about 80 lines of Rust.",
+      "Once this loop works, you can hand-assemble bytecode and watch it run. The next lesson adds the compiler that produces that bytecode for you.",
+    ],
+    sim: "dispatch",
+    simTitle: "Watch the dispatch loop run",
+    jvm: {
+      title: "What HotSpot's interpreter teaches us",
+      points: [
+        "Each method call gets a **frame** with an array of local variables and an operand stack. Instructions move values between the two, as in `iload_1` and `istore_2`.",
+        "The interpreter keeps the program counter and the top of the stack in machine registers while it runs. Keeping hot state in local variables, not in heap fields, is the most important interpreter optimization.",
+        "HotSpot's **template interpreter** generates a small machine-code routine per opcode at startup and jumps straight between them. A Rust `match` on a dense enum compiles to a jump table, which is the portable version of that.",
+        "Runtime errors such as `ArithmeticException` know exactly which instruction failed, because the program counter is always known. Our errors use the line table for the same reason.",
+      ],
+    },
+    concepts: [
+      {
+        heading: "Fetch, decode, execute",
+        body: [
+          "**Fetch**: read `code[ip]`. **Advance**: `ip += 1`, before doing anything else, so a jump can simply overwrite `ip`. **Decode and execute**: `match` on the instruction and do its work, which usually means popping operands and pushing a result.",
+          "Note that the operands come off the stack in reverse order. For `a - b`, `b` was pushed last, so it's on top. Getting that backwards is the classic first bug in a stack VM.",
+        ],
+      },
+    ],
+    build: {
+      intro: "The VM is a struct with a stack and a globals table, plus one method, `run`, that loops over a chunk.",
+      milestone: "a VM that runs any chunk using the instructions from lesson 03, with runtime type errors that report the source line.",
+      steps: [
+        {
+          title: "The VM struct and stack helpers",
+          body: "The operand stack is a `Vec<Value>`. Locals will live in the same Vec in the next lesson. Globals are a `HashMap` from name to value.",
+          code: {
+            lang: "rust",
+            caption: "src/vm.rs",
+            code: `use crate::chunk::{Chunk, Op};
+use crate::value::Value;
+use std::collections::HashMap;
+
+pub struct Vm {
+    stack: Vec<Value>,               // operand stack (and, from lesson 05, local variables)
+    globals: HashMap<String, Value>, // top-level variables, by name
+}
+
+impl Vm {
+    pub fn new() -> Self {
+        Vm { stack: Vec::with_capacity(256), globals: HashMap::new() }
+    }
+
+    fn push(&mut self, v: Value) {
+        self.stack.push(v);
+    }
+
+    fn pop(&mut self) -> Value {
+        // the compiler guarantees balanced pushes and pops,
+        // so an empty stack here is a bug in *our* code, not the user's
+        self.stack.pop().expect("stack underflow (compiler bug)")
+    }
+
+    /// Look at a value without popping it. 0 = top, 1 = just below it.
+    fn peek(&self, distance: usize) -> Value {
+        self.stack[self.stack.len() - 1 - distance]
+    }
+
+    /// A runtime error that points at the source line of the failing instruction.
+    fn error(&self, chunk: &Chunk, ip: usize, msg: &str) -> String {
+        // ip has already moved past the failing instruction, hence ip - 1
+        format!("[line {}] runtime error: {msg}", chunk.lines[ip - 1])
+    }
+}`,
+          },
+          explain: [
+            "`peek` exists so an instruction can check its operands *before* popping them. When there's an error, the stack still shows what went wrong, which helps when you add a debugger.",
+            "`Vec::with_capacity(256)` avoids reallocating for small programs. It's an optimization, not a limit, because the Vec still grows if it needs to.",
+          ],
+          jvm: "A JVM frame's operand stack has a fixed size, `max_stack`, calculated by `javac`, so it never grows. You could calculate the same for each Wisp chunk. A growable `Vec` is simpler, and costs little.",
+        },
+        {
+          title: "The loop",
+          body: "Here's the whole interpreter. Each arm is a few lines, and the comment above each group says what it does to the stack.",
+          code: {
+            lang: "rust",
+            caption: "src/vm.rs (continued)",
+            code: `impl Vm {
+    pub fn run(&mut self, chunk: &Chunk) -> Result<(), String> {
+        let mut ip = 0; // instruction pointer: index of the next instruction
+
+        loop {
+            // FETCH, then advance first, so jumps can just overwrite ip
+            let op = chunk.code[ip];
+            ip += 1;
+
+            // DECODE + EXECUTE
+            match op {
+                // ── push constants ──
+                Op::Const(k) => self.push(chunk.consts[k as usize]),
+                Op::Nil => self.push(Value::Nil),
+                Op::True => self.push(Value::Bool(true)),
+                Op::False => self.push(Value::Bool(false)),
+                Op::Pop => { self.pop(); }
+                Op::Dup => self.push(self.peek(0)),
+
+                // ── arithmetic: [.., a, b] -> [.., a op b] ──
+                Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Lt | Op::Gt => {
+                    // b was pushed last, so it's on top (distance 0)
+                    let (Value::Num(a), Value::Num(b)) = (self.peek(1), self.peek(0)) else {
+                        return Err(self.error(chunk, ip, "operands must be numbers"));
+                    };
+                    self.pop();
+                    self.pop();
+                    self.push(match op {
+                        Op::Add => Value::Num(a + b),
+                        Op::Sub => Value::Num(a - b),
+                        Op::Mul => Value::Num(a * b),
+                        Op::Div => Value::Num(a / b),
+                        Op::Lt => Value::Bool(a < b),
+                        _ => Value::Bool(a > b), // Op::Gt
+                    });
+                }
+                Op::Neg => match self.pop() {
+                    Value::Num(n) => self.push(Value::Num(-n)),
+                    _ => return Err(self.error(chunk, ip, "operand must be a number")),
+                },
+                Op::Not => {
+                    let v = self.pop();
+                    self.push(Value::Bool(!v.is_truthy()));
+                }
+                Op::Eq => {
+                    let (b, a) = (self.pop(), self.pop());
+                    self.push(Value::Bool(a == b)); // any two values can be compared
+                }
+
+                // ── globals: the operand indexes chunk.names ──
+                Op::DefineGlobal(k) => {
+                    let v = self.pop();
+                    self.globals.insert(chunk.names[k as usize].clone(), v);
+                }
+                Op::GetGlobal(k) => {
+                    let name = &chunk.names[k as usize];
+                    let Some(&v) = self.globals.get(name) else {
+                        return Err(self.error(chunk, ip, &format!("undefined variable '{name}'")));
+                    };
+                    self.push(v);
+                }
+                Op::SetGlobal(k) => {
+                    let name = &chunk.names[k as usize];
+                    let v = self.peek(0); // assignment is an expression: the value stays on the stack
+                    match self.globals.get_mut(name) {
+                        Some(slot) => *slot = v,
+                        None => return Err(self.error(chunk, ip, &format!("undefined variable '{name}'"))),
+                    }
+                }
+
+                // ── locals: the operand is a stack slot (see lesson 05) ──
+                Op::GetLocal(slot) => self.push(self.stack[slot as usize]),
+                Op::SetLocal(slot) => self.stack[slot as usize] = self.peek(0),
+
+                // ── control flow: just move ip ──
+                Op::Jump(target) | Op::Loop(target) => ip = target as usize,
+                Op::JumpIfFalse(target) => {
+                    if !self.pop().is_truthy() {
+                        ip = target as usize;
+                    }
+                }
+
+                Op::Print => println!("{}", self.pop()),
+                Op::Return => return Ok(()),
+            }
+        }
+    }
+}`,
+          },
+          explain: [
+            "The arithmetic instructions share one arm. The `let (Value::Num(a), Value::Num(b)) = ... else` pattern checks both types in a single line. If either one isn't a number, the `else` branch runs and returns the error.",
+            "Comparisons push a `Bool`, and `JumpIfFalse` pops it. So `if a < b` compiles to `... Lt, JumpIfFalse(else)`. The JVM fuses those two steps into one instruction (`if_icmpge`). That's an optimization you could add later.",
+            "`SetGlobal` and `SetLocal` don't pop, because assignment is an expression in Wisp (`a = b = 1` works). When an assignment is used as a statement, the compiler emits a `Pop` after it.",
+            "`Return` simply ends the loop for now. Lesson 07 turns it into \"go back to the caller\".",
+            "The `match` is **exhaustive**: if a later lesson adds an `Op` variant and you forget to handle it, Rust refuses to compile. That's a useful safety net while the instruction set grows.",
+          ],
+          jvm: "HotSpot interprets `iadd` with a few machine instructions: pop two ints, add them, push the result, then load the next opcode and jump to its handler. It doesn't type-check, because the bytecode verifier already proved both operands are ints. Wisp checks at runtime instead, the price of dynamic typing that a JIT later tries to win back.",
+        },
+        {
+          title: "Run hand-written bytecode",
+          body: "Replace the disassembler demo in `main.rs` with this. It's the program `let x = 4  print x * x - 1`, compiled by hand.",
+          code: {
+            lang: "rust",
+            caption: "src/main.rs (temporary)",
+            code: `let mut c = Chunk::default();
+let four = c.add_const(Value::Num(4.0));
+let one = c.add_const(Value::Num(1.0));
+let x = c.add_name("x");
+for op in [
+    Op::Const(four), Op::DefineGlobal(x),         // let x = 4
+    Op::GetGlobal(x), Op::GetGlobal(x), Op::Mul,  // x * x
+    Op::Const(one), Op::Sub,                      // ... - 1
+    Op::Print, Op::Return,
+] {
+    c.emit(op, 1);
+}
+vm::Vm::new().run(&c)?;`,
+          },
+          output: "15",
+          explain: [
+            "Try breaking it on purpose. Swap `Op::Const(one)` for `Op::True` and you'll get `[line 1] runtime error: operands must be numbers`. That's your first runtime error.",
+          ],
+        },
+      ],
+    },
+    questions: [
+      {
+        q: "Why keep `ip` in a local variable instead of a field on `Vm`?",
+        intuition: "A local variable can live in a CPU register. A field lives in memory, so every read and write is a trip to the cache.",
+        technical:
+          "The compiler can't keep `self.ip` in a register across calls like `self.push()`, because those calls might read or write it. A local has no such problem. Every fast interpreter, HotSpot's included, keeps `ip` and often the stack top in locals, and writes them back only when something else needs to see them, such as a call or an error.",
+      },
+      {
+        q: "Is a big `match` really fast enough?",
+        intuition: "Yes, for a first VM. The compiler turns it into a jump table: one lookup and one jump per instruction.",
+        technical:
+          "The cost is the single indirect jump at the top of the loop, which the CPU's branch predictor has to guess from very little history. \"Threaded\" dispatch puts a separate jump at the end of every handler so each one is predicted separately. Rust can't express that directly without unsafe tricks. The performance lesson covers what to do instead.",
+      },
+      {
+        q: "What happens if the bytecode is wrong, say a jump to index 99999?",
+        intuition: "The VM panics with an index-out-of-bounds error. That's safe, but it's a crash rather than a helpful message.",
+        technical:
+          "Rust's bounds checks keep it memory-safe. The JVM goes further: its **verifier** checks every class before running it, so a jump target outside the method or a stack that doesn't balance is rejected at load time. If you ever load bytecode from disk, write a small verifier too.",
+      },
+    ],
+    references: [
+      ci("A Virtual Machine", "a-virtual-machine", "The same loop in C, with a stack-tracing debug mode."),
+      { title: "JVM Anatomy Quarks", by: "Aleksey Shipilëv", url: "https://shipilev.net/jvm/anatomy-quarks/", kind: "article", note: "Short deep dives into how HotSpot really executes code." },
+    ],
+  },
+
+  /* ───────────────────────────── 05 · The compiler ───────────────────────────── */
   {
     slug: "compiler",
     title: "Compiling to Bytecode",
-    level: "Intermediate",
-    accent: "emerald",
+    level: "Foundational",
+    accent: "pink",
     icon: "Cog",
-    summary: "Resolve scopes to slots, emit jumps and patch them later, and build a constant pool, the same way javac's code generator does.",
-    tags: ["Local Slots", "Jump Patching", "Constant Pool", "Max Stack"],
+    summary: "Walk the AST and emit bytecode: expressions, global and local variables, scopes, and if/while with jump patching, the way javac's code generator does.",
+    tags: ["Code generation", "Local slots", "Scopes", "Jump patching"],
     intro: [
-      "The compiler is a translator with a good memory. It walks the AST, keeps track of which variables are in scope, and emits instructions. Expressions compile in post-order (children first, then the operator). Control flow compiles to jumps whose targets are often unknown when the jump is emitted.",
-      "`javac`'s code generator solves the same problems your compiler will: mapping locals to numbered slots, back-patching forward jumps, deduplicating constants, and calculating how deep the operand stack can get.",
+      "This lesson connects the two halves. The compiler walks the syntax tree from lesson 02 and emits the instructions from lesson 03, so the VM from lesson 04 can run real Wisp programs.",
+      "There are only three ideas to learn. Expressions compile to **postfix order**: operands first, then the operator. Local variables become **stack slots** decided at compile time. And control flow uses **jumps whose targets are filled in later**, once the compiler knows where they should land.",
     ],
     sim: "flow",
     simTitle: "From tree to instructions",
     flow: [
-      { label: "Resolve", sub: "names → scopes" },
-      { label: "Allocate", sub: "locals → slots" },
-      { label: "Emit", sub: "post-order ops" },
-      { label: "Patch", sub: "fill jump offsets" },
-      { label: "Seal", sub: "consts + max_stack" },
+      { label: "AST", sub: "If(Lt(x, 10), …)" },
+      { label: "Walk", sub: "post-order: kids first" },
+      { label: "Emit", sub: "GetLocal 0, Const 10, Lt" },
+      { label: "Patch", sub: "JumpIfFalse → 12" },
+      { label: "Chunk", sub: "ready to run" },
     ],
     jvm: {
       title: "What javac's code generator teaches us",
       points: [
-        "Locals are numbered slots (`iload_1`, `astore_2`), and slots are reused once a block's scope ends.",
-        "Forward branches are emitted with placeholder offsets and filled in once the target address is known.",
-        "Each method gets `max_stack`, computed from how far each instruction moves the stack. The frame is sized exactly once.",
-        "`StackMapTable` frames let the verifier check types in one linear pass. They're only needed when the bytecode can't be trusted.",
+        "Local variables have no names at runtime. `javac` gives each one a numbered slot in the frame (`istore_1`, `iload_2`), so a variable read is an array index, not a hash lookup.",
+        "Slots are reused when a scope ends. Two variables in sibling blocks can share slot 3, which keeps `max_locals` small.",
+        "`javac` emits forward jumps with a placeholder and fills in the target once it reaches it. Its code generator keeps a list of pending jumps for exactly this.",
+        "Short-circuit `&&` and `||` are compiled to jumps, not to an operator. The right-hand side is skipped by jumping over its code.",
       ],
     },
     concepts: [
       {
-        heading: "Locals live in the stack, not in a hash map",
+        heading: "Locals are slots, decided at compile time",
         body: [
-          "Inside a function, `let x` doesn't create a dictionary entry. It claims the next slot in the current frame. The compiler keeps a list of `(name, depth)` pairs. Resolving a name means scanning that list backwards, which gives shadowing for free. When a block ends, its locals are popped.",
-          "At runtime, `GET_LOCAL 2` is a single indexed load from `stack[frame.base + 2]`.",
-        ],
-      },
-      {
-        heading: "Jumps and back-patching",
-        body: [
-          "To compile `if`, emit `JUMP_IF_FALSE ????`, compile the then-branch, then go back and write the real offset. Loops jump backwards with `LOOP offset`, and that target is already known.",
+          "At the top level, `let` creates a **global**, stored by name in the VM's table. Inside a block it creates a **local**. The compiler keeps a list of locals in scope, and a local's position in that list is its stack slot. At runtime, `GetLocal(2)` reads `stack[2]`, with no names and no hashing.",
+          "This works because of one invariant: between statements, the stack holds exactly the local variables in scope and nothing else. So when `let y = ...` evaluates its initializer, the value lands in the next free slot, which is exactly where the variable belongs. The compiler just records the name.",
         ],
         code: {
-          lang: "rust",
-          code: `fn emit_jump(&mut self, op: Op) -> usize {
-    self.emit(op as u8);
-    self.emit(0xff); self.emit(0xff); // placeholder
-    self.code().len() - 2
-}
-fn patch_jump(&mut self, at: usize) {
-    let jump = (self.code().len() - at - 2) as u16;
-    self.code_mut()[at..at + 2].copy_from_slice(&jump.to_be_bytes());
-}`,
+          lang: "text",
+          caption: "javap -c: locals in Java",
+          code: `void demo() {          //  0: iconst_2
+  int a = 2;           //  1: istore_1     slot 0 is \`this\`
+  int b = 3;           //  2: iconst_3
+  print(a * b);        //  3: istore_2
+}                      //  4: aload_0 ... iload_1, iload_2, imul ...`,
         },
       },
-    ],
-    build: {
-      intro: "One `FunctionCompiler` per function being compiled, linked to the enclosing one so that upvalues can be resolved later.",
-      steps: [
-        {
-          title: "Track scopes",
-          body: "A `Vec<Local>` plus the current `scope_depth`. `begin_scope` increments the depth, and `end_scope` pops locals and emits `POP` (or `CLOSE_UPVALUE` for captured ones).",
-          code: {
-            lang: "rust",
-            code: `struct Local { name: Sym, depth: u32, captured: bool }
-struct FunctionCompiler<'a> {
-    enclosing: Option<&'a mut FunctionCompiler<'a>>,
-    function: FunctionProto,
-    locals: Vec<Local>,
-    scope_depth: u32,
-}`,
-          },
-        },
-        {
-          title: "Compile statements",
-          body: "Expression statements emit `POP` so the stack stays balanced. Track stack depth while emitting to compute `max_stack`, which lets the VM check for overflow once per call instead of on every push.",
-        },
-        {
-          title: "Fold constants",
-          body: "If both operands of `+` are numeric literals, emit the result as a single constant. It's a few lines of code and a nice first optimization.",
-        },
-      ],
-    },
-    questions: [
       {
-        q: "How do break and continue compile?",
-        intuition: "`break` is a jump to a spot you haven't reached yet, so you note where you left the placeholder and fill it in when the loop ends.",
-        technical:
-          "Keep a stack of loop contexts. Each one holds the loop start offset (for `continue`) and a list of pending `break` jump sites. At loop end, patch every site. Before jumping, also pop and close any locals declared inside the loop body.",
-      },
-      {
-        q: "Does my VM need a bytecode verifier like the JVM's?",
-        intuition: "Only if strangers can hand it bytecode. If your own compiler is the only source, it's checking its own homework.",
-        technical:
-          "The JVM verifies because class files can come from anywhere, including hostile sources. If you load cached or third-party bytecode, verify stack depths, jump targets within bounds, and constant indices. Trusted in-process compilation can skip it and rely on debug assertions.",
-      },
-      {
-        q: "Why compute max_stack ahead of time?",
-        intuition: "If you know the biggest pot you'll need before cooking, you never have to stop and look for a bigger one.",
-        technical:
-          "With `max_stack` known, `CALL` can do a single bounds check (`sp + max_stack <= stack_end`) and every push inside the function can skip its own check. One check per call replaces one per instruction.",
-      },
-    ],
-  },
-  {
-    slug: "memory",
-    title: "Stack, Heap & Values",
-    level: "Foundational",
-    accent: "cyan",
-    icon: "Layers",
-    summary: "See where values live: frames on a stack, objects on a heap, and how to pack a dynamic value into 8 bytes.",
-    tags: ["Call Frames", "Object Headers", "Tagged Values", "NaN-Boxing"],
-    intro: [
-      "Every JVM thread has its own stack of frames. Each frame holds a method's locals and its operand stack. Objects live on a shared heap that the garbage collector manages. A local of type `Employee` is only a reference, an arrow pointing into the heap.",
-      "Your VM follows the same layout. The design question that matters most here is how to represent a value. Wisp values can be a number, a bool, nil or a heap object, and the way you encode that affects the speed of every instruction.",
-    ],
-    sim: "heap-stack",
-    simTitle: "Watch frames push, objects allocate, and references drop",
-    jvm: {
-      title: "What the JVM memory layout teaches us",
-      points: [
-        "Stacks are per thread. Frames push on call and pop on return, so locals never need garbage collection.",
-        "Primitives sit directly in locals and fields. Only objects are behind references.",
-        "Every object starts with a header: a mark word (hash, lock and GC bits) and a class pointer.",
-        "Deep recursion causes a `StackOverflowError` and heap exhaustion causes an `OutOfMemoryError`. Fail with a clear error, not a segfault.",
-      ],
-    },
-    concepts: [
-      {
-        heading: "Frames as windows into one big stack",
+        heading: "Backpatching jumps",
         body: [
-          "The JVM gives each frame its own locals array and operand stack. Lua and clox use something simpler: one contiguous value stack, where each call frame is a window with a `base` pointer. The caller's arguments become the callee's first locals without being copied, which makes calls very cheap.",
-        ],
-        code: {
-          lang: "rust",
-          code: `struct CallFrame {
-    closure: Gc<Closure>,
-    ip: usize,     // next instruction in closure.proto.code
-    base: usize,   // stack[base] = callee, stack[base+1..] = args/locals
-}`,
-        },
-      },
-      {
-        heading: "Value representation: enum vs NaN-boxing",
-        body: [
-          "The obvious Rust choice is `enum Value { Nil, Bool(bool), Num(f64), Obj(Gc<Obj>) }`. It's safe and clear, and 16 bytes each. NaN-boxing fits every value into 8 bytes. IEEE-754 doubles have trillions of unused NaN bit patterns, so you hide tags and 48-bit pointers inside them. Numbers stay plain doubles, and everything else is a quiet NaN carrying a payload.",
-          "Start with the enum, but hide it behind methods like `is_num()` and `as_obj()`. Switching to NaN-boxing later then changes one file.",
+          "When compiling `if cond { A } else { B }`, the compiler has to emit \"jump to the else branch if false\" *before* it has compiled `A`, so it doesn't know the target yet. It emits `JumpIfFalse(0)`, remembers that instruction's index, compiles `A`, and then **patches** the placeholder with the real target. Loops are easier: the target of the backwards jump is already known.",
         ],
       },
     ],
     build: {
-      intro: "Get the value type, the value stack and call frames working, with clear overflow errors.",
+      intro: "One file, `compiler.rs`. It's a recursive walk with one function for expressions and one for statements.",
+      milestone: "`cargo run -- loop.wisp` compiles and runs real programs with variables, blocks, `if`, `while`, `and` and `or`.",
       steps: [
         {
-          title: "Define Value and a heap object header",
-          body: "Every heap object shares a header with a type tag and a GC mark bit, like the JVM mark word.",
+          title: "Compiler state",
+          body: "The compiler owns the chunk it's filling, the locals currently in scope, and the current scope depth (0 means the top level).",
           code: {
             lang: "rust",
-            code: `#[derive(Clone, Copy)]
-pub enum Value { Nil, Bool(bool), Num(f64), Obj(Gc<ObjHeader>) }
+            caption: "src/compiler.rs",
+            code: `use crate::ast::{Expr, Stmt};
+use crate::chunk::{Chunk, Op};
+use crate::lexer::Tok;
+use crate::value::Value;
 
-#[repr(C)]
-pub struct ObjHeader { kind: ObjKind, marked: Cell<bool>, next: Cell<*mut ObjHeader> }`,
+struct Local {
+    name: String,
+    depth: usize, // the scope depth where it was declared
+}
+
+pub struct Compiler {
+    chunk: Chunk,
+    locals: Vec<Local>, // locals[i] lives in stack slot i
+    scope_depth: usize, // 0 = top level, where \`let\` makes globals
+    line: u32,          // source line recorded for each emitted op
+}
+
+pub fn compile(program: &[Stmt]) -> Result<Chunk, String> {
+    let mut c = Compiler { chunk: Chunk::default(), locals: Vec::new(), scope_depth: 0, line: 1 };
+    for stmt in program {
+        c.stmt(stmt)?;
+    }
+    c.emit(Op::Return);
+    Ok(c.chunk)
+}
+
+impl Compiler {
+    fn emit(&mut self, op: Op) -> usize {
+        self.chunk.emit(op, self.line)
+    }
+
+    /// Point a placeholder jump at the *current* end of the code.
+    fn patch(&mut self, at: usize) {
+        let target = self.chunk.code.len() as u16;
+        match &mut self.chunk.code[at] {
+            Op::Jump(t) | Op::JumpIfFalse(t) => *t = target,
+            _ => unreachable!("only jumps get patched"),
+        }
+    }
+
+    /// Search innermost-first, so an inner \`let x\` shadows an outer one.
+    fn resolve_local(&self, name: &str) -> Option<u16> {
+        self.locals.iter().rposition(|l| l.name == name).map(|i| i as u16)
+    }
+}`,
           },
+          explain: [
+            "`emit` returns the new instruction's index. For most instructions it's ignored, but for jumps it's what `patch` needs later.",
+            "`rposition` searches from the end of the list. The newest local with that name wins, which is exactly how shadowing works.",
+          ],
         },
         {
-          title: "Preallocate the value stack",
-          body: "Use a fixed `Vec<Value>` with capacity of, say, 64K slots. Check `base + max_stack` on each call and raise a Wisp-level `StackOverflow` error, which is your version of `-Xss`.",
+          title: "Expressions: children first, then the operator",
+          body: "Each expression leaves exactly **one** value on the stack. To compile a binary operator, compile the left side (one value), then the right side (another value), then emit the operator, which pops two and pushes one.",
+          code: {
+            lang: "rust",
+            caption: "src/compiler.rs (continued)",
+            code: `impl Compiler {
+    fn expr(&mut self, e: &Expr) -> Result<(), String> {
+        match e {
+            Expr::Num(n) => {
+                let k = self.chunk.add_const(Value::Num(*n));
+                self.emit(Op::Const(k));
+            }
+            Expr::Bool(true) => { self.emit(Op::True); }
+            Expr::Bool(false) => { self.emit(Op::False); }
+            Expr::Nil => { self.emit(Op::Nil); }
+
+            Expr::Unary(op, operand, line) => {
+                self.expr(operand)?; // the operand first...
+                self.line = *line;
+                self.emit(if *op == Tok::Minus { Op::Neg } else { Op::Not }); // ...then the operator
+            }
+            Expr::Binary(a, op, b, line) => {
+                self.expr(a)?;
+                self.expr(b)?;
+                self.line = *line;
+                match op {
+                    Tok::Plus => self.emit(Op::Add),
+                    Tok::Minus => self.emit(Op::Sub),
+                    Tok::Star => self.emit(Op::Mul),
+                    Tok::Slash => self.emit(Op::Div),
+                    Tok::EqEq => self.emit(Op::Eq),
+                    Tok::Lt => self.emit(Op::Lt),
+                    Tok::Gt => self.emit(Op::Gt),
+                    // derived operators: two instructions instead of a new opcode
+                    Tok::BangEq => { self.emit(Op::Eq); self.emit(Op::Not) } // a != b  is  !(a == b)
+                    Tok::LtEq => { self.emit(Op::Gt); self.emit(Op::Not) }   // a <= b  is  !(a > b)
+                    Tok::GtEq => { self.emit(Op::Lt); self.emit(Op::Not) }   // a >= b  is  !(a < b)
+                    _ => unreachable!("the parser only builds these"),
+                };
+            }
+
+            Expr::Var(name, line) => {
+                self.line = *line;
+                match self.resolve_local(name) {
+                    Some(slot) => self.emit(Op::GetLocal(slot)),
+                    None => { // not a local, so it must be a global
+                        let k = self.chunk.add_name(name);
+                        self.emit(Op::GetGlobal(k))
+                    }
+                };
+            }
+            Expr::Assign(name, value, line) => {
+                self.expr(value)?;
+                self.line = *line;
+                match self.resolve_local(name) {
+                    Some(slot) => self.emit(Op::SetLocal(slot)),
+                    None => {
+                        let k = self.chunk.add_name(name);
+                        self.emit(Op::SetGlobal(k))
+                    }
+                };
+            }
+
+            Expr::Logical(a, op, b) => {
+                self.expr(a)?;
+                self.emit(Op::Dup); // keep a copy: if we short-circuit, \`a\` is the answer
+                if *op == Tok::And {
+                    // a and b: if a is falsy, stop with a. Otherwise the answer is b.
+                    let skip_b = self.emit(Op::JumpIfFalse(0));
+                    self.emit(Op::Pop); // a was truthy: discard it
+                    self.expr(b)?;
+                    self.patch(skip_b);
+                } else {
+                    // a or b: if a is truthy, stop with a. Otherwise the answer is b.
+                    let try_b = self.emit(Op::JumpIfFalse(0));
+                    let done = self.emit(Op::Jump(0));
+                    self.patch(try_b);
+                    self.emit(Op::Pop);
+                    self.expr(b)?;
+                    self.patch(done);
+                }
+            }
+            other => return Err(format!("not supported yet: {other:?}")), // strings, calls, tables: coming up
+        }
+        Ok(())
+    }
+}`,
+          },
+          explain: [
+            "The recursion **is** the postfix ordering. `self.expr(a)` emits all of `a`'s instructions before `b`'s, and the operator comes last. For `1 + 2 * 3` that gives `Const 1, Const 2, Const 3, Mul, Add`, the same sequence you hand-wrote in lesson 03.",
+            "Variable lookup is decided **here, once**, at compile time: is the name in the locals list or not? The VM never has to ask. Locals turn into an array index, and only globals pay for a hash lookup.",
+            "Trace `and` with `a` falsy: the stack is `[a, a]`, then `JumpIfFalse` pops one copy and jumps past `b`, leaving `[a]`. With `a` truthy: it doesn't jump, `Pop` leaves `[]`, and `b` leaves `[b]`. Either way, exactly one value remains.",
+          ],
+          jvm: "`javac` compiles `a && b` the same way: evaluate `a`, `ifeq` past the code for `b`. Java doesn't need the `Dup` because its `&&` always produces a boolean. Wisp's `and` returns one of its operands (as Lua's and JavaScript's do), so it has to keep that operand on the stack.",
         },
         {
-          title: "Implement CALL and RETURN",
-          body: "`CALL argc` pushes a frame whose base is `sp - argc - 1`. `RETURN` pops the result, truncates the stack to the frame's base, pushes the result back and resumes the caller.",
+          title: "Statements, scopes and jumps",
+          body: "Statements leave the stack exactly as they found it, apart from `let` inside a block, which deliberately leaves its value behind because that stack slot *is* the new variable.",
+          code: {
+            lang: "rust",
+            caption: "src/compiler.rs (continued)",
+            code: `impl Compiler {
+    fn stmt(&mut self, s: &Stmt) -> Result<(), String> {
+        match s {
+            Stmt::Expr(e) => {
+                self.expr(e)?;
+                self.emit(Op::Pop); // the value isn't used, so drop it to keep the stack balanced
+            }
+            Stmt::Print(e) => {
+                self.expr(e)?;
+                self.emit(Op::Print);
+            }
+            Stmt::Let(name, init) => {
+                self.expr(init)?; // the value is now on top of the stack
+                if self.scope_depth == 0 {
+                    let k = self.chunk.add_name(name);
+                    self.emit(Op::DefineGlobal(k)); // pop it into the globals table
+                } else {
+                    // a local: emit nothing. The value already sits in the next
+                    // free slot, so recording the name makes that slot the variable.
+                    self.locals.push(Local { name: name.clone(), depth: self.scope_depth });
+                }
+            }
+            Stmt::Block(body) => self.block(body)?,
+
+            Stmt::If(cond, then, otherwise) => {
+                self.expr(cond)?;
+                let to_else = self.emit(Op::JumpIfFalse(0)); // target not known yet
+                self.block(then)?;
+                let to_end = self.emit(Op::Jump(0)); // after \`then\`, skip over \`else\`
+                self.patch(to_else);                 // the else branch starts here
+                if let Some(otherwise) = otherwise {
+                    self.block(otherwise)?;
+                }
+                self.patch(to_end);                  // both paths meet here
+            }
+            Stmt::While(cond, body) => {
+                let start = self.chunk.code.len();   // the loop header: re-check cond here
+                self.expr(cond)?;
+                let exit = self.emit(Op::JumpIfFalse(0));
+                self.block(body)?;
+                self.emit(Op::Loop(start as u16));   // the backwards jump: target already known
+                self.patch(exit);
+            }
+            other => return Err(format!("not supported yet: {other:?}")),
+        }
+        Ok(())
+    }
+
+    fn block(&mut self, body: &[Stmt]) -> Result<(), String> {
+        self.scope_depth += 1;
+        for s in body {
+            self.stmt(s)?;
+        }
+        self.scope_depth -= 1;
+        // leaving the scope: pop every local declared inside it
+        while self.locals.last().is_some_and(|l| l.depth > self.scope_depth) {
+            self.locals.pop();
+            self.emit(Op::Pop);
+        }
+        Ok(())
+    }
+}`,
+          },
+          explain: [
+            "`If` emits two placeholders. `to_else` is patched to point just after the `Jump`. `to_end` is patched to point after the else branch. Draw the instruction list once on paper and it clicks.",
+            "Without an `else`, the `Jump` jumps to the very next instruction. It's harmless, and you could skip emitting it, which is a nice small optimization to try.",
+            "`block` pops its locals on the way out. This keeps the invariant that between statements the stack holds only the locals in scope, which is what makes slot numbers line up with `locals` positions.",
+            "The `while` loop's body is a block, so locals declared inside it are pushed and popped on every iteration, and the stack never grows across iterations.",
+          ],
+          jvm: "Java's `while (i < n) { ... }` compiles to the same shape (often with the test moved to the bottom to save a jump): a conditional jump out, the body, and a `goto` back to the test. The backwards `goto` is where HotSpot counts loop iterations to decide when to JIT-compile, the job our `Loop` instruction is reserved for.",
+        },
+        {
+          title: "Run your first real program",
+          body: "Change `run` in `main.rs` to call `compiler::compile`, if you haven't already, and give it a script. You now have a working language.",
+          code: {
+            lang: "wisp",
+            caption: "loop.wisp",
+            code: `let total = 0
+let i = 1
+while i <= 100 {
+  total = total + i
+  i = i + 1
+}
+print total
+
+{
+  let a = 2
+  let b = 3
+  if a < b and b < 10 { print a * b } else { print 0 }
+}`,
+          },
+          output: `5050
+6`,
+          explain: [
+            "`total` and `i` are globals because they're at the top level. `a` and `b` are locals in slots 0 and 1. Call `chunk.disassemble(\"script\")` before running to see `GetGlobal` for the first part and `GetLocal(0)` and `GetLocal(1)` for the second.",
+          ],
         },
       ],
     },
     questions: [
       {
-        q: "Java has primitives and objects. Why doesn't my language need that split?",
-        intuition: "Users never see the split. The VM still makes it internally: small things go in the box, big things go in the warehouse with a ticket in the box.",
+        q: "Why are globals looked up by name but locals by slot?",
+        intuition: "The compiler can see every local's declaration, so it can number them. A global might be defined later, in another file, or never, so it has to be found by name when the code runs.",
         technical:
-          "Numbers, bools and nil are immediates stored directly in the `Value`. Strings, functions and objects are heap references. That's the same split the JVM makes, just invisible at the language level, much like JavaScript.",
+          "Locals are lexically scoped: their whole lifetime is visible inside one function. Globals are late-bound, so a function can refer to a global that's defined after the function. The performance lesson shows how to turn global names into slots too, by resolving them on first use.",
       },
       {
-        q: "What is NaN-boxing, intuitively?",
-        intuition: "A 64-bit double has a huge range of \"not a number\" values that no calculation ever produces. You treat those unused codes as tagged pointers and small values.",
+        q: "What would break if a statement left an extra value on the stack?",
+        intuition: "Every later local would end up one slot away from where the compiler thinks it is, so variables would silently read each other's values.",
         technical:
-          "A quiet NaN has the exponent all ones plus the quiet bit, which leaves about 51 payload bits. x86-64 and ARM64 user-space pointers fit in 48 bits. Use the sign bit to flag a pointer and a few low bits for nil, true and false. Decoding is a mask and a compare.",
+          "Slot numbers come from positions in the `locals` list, and they're only correct if the runtime stack contains nothing else between statements. That's why expression statements end with `Pop`. A debug-mode check that compares `stack.len()` with the number of locals after each statement catches these bugs right away.",
       },
       {
-        q: "Why must every thread have its own stack?",
-        intuition: "Two cooks sharing one cutting board would keep pushing each other's vegetables off.",
+        q: "Why not give every comparison its own opcode, like `Le` and `Ne`?",
+        intuition: "You can. It saves one instruction per comparison. Fewer opcodes means less code to write and test, so start small and add them when profiling says they matter.",
         technical:
-          "Frames record a function's in-progress state: ip, locals and temporaries. Interleaved threads would corrupt each other's frames. The heap is shared because objects are meant to be shared, and that sharing is exactly why you need GC coordination and a memory model.",
+          "Each derived form costs one extra dispatch (`Gt` plus `Not`). In a hot loop condition that's measurable, so mature VMs add the specialized versions and also fuse compare-and-jump, like the JVM's `if_icmple`. Both are simple peephole changes in `Binary` and `If` once the basics work.",
       },
+    ],
+    references: [
+      ci("Compiling Expressions", "compiling-expressions"),
+      ci("Local Variables", "local-variables"),
+      ci("Jumping Back and Forth", "jumping-back-and-forth", "Backpatching, explained with diagrams."),
     ],
   },
 ];
