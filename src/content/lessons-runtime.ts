@@ -19,94 +19,133 @@ export const runtimeLessons: Lesson[] = [
     summary: "Give the VM a heap: references, interned strings, and classless objects (tables), plus how the JVM's fixed object layouts inspire faster ones.",
     tags: ["Heap & references", "String interning", "Tables", "Shapes"],
     intro: [
-      "So far every value fits in 16 bytes, but strings and objects don't. They have to live somewhere else, the **heap**, and values hold a small **reference** to them. That's exactly how the JVM works: an `Object` variable holds a reference, and the object itself lives in the Java heap.",
-      "In this lesson you'll build a simple heap: a `Vec` of objects, with a reference that's just an index into it. On top of it come strings, a string-intern table, and Wisp's version of objects. Wisp has no classes, so an object is a **table**: a bag of named fields you can add to at any time.",
+      "So far every value fits in 16 bytes, but strings and objects don't. They have to live somewhere else, the **heap**, and a value only holds a small **reference** to them, like a ticket number for an item in a cloakroom. That's exactly how the JVM works: a variable of type `Object` holds a reference, and the object itself lives in the Java heap.",
+      "In this lesson you'll build a simple heap: a list of objects, where a reference is just a position in that list. On top of it come strings and Wisp's objects. Wisp has no classes, so an object is a **table**: a bag of named fields you can add to at any time.",
     ],
     sim: "shapes",
     simTitle: "How shapes turn dynamic fields into fixed slots",
     jvm: {
       title: "What the JVM heap teaches us",
       points: [
-        "Every Java object starts with a header (a mark word plus a class pointer), followed by its fields at **fixed offsets** decided when the class loads. `getfield` is a single load from `object + offset`.",
+        "Every Java object starts with a small header, followed by its fields at **fixed offsets** decided when its class loads. So `getfield` is a single memory read at `object + offset`.",
         "String literals are **interned**: every `\"hello\"` in every class points to the same `String` object. That's why `==` happens to work on literals, and why `String.intern()` exists.",
         "Variables never contain objects, only references to them. Copying a reference is cheap, and two variables can point to the same object.",
-        "With compressed oops, HotSpot stores references as 32-bit numbers and scales them into addresses. A reference is a number, not necessarily a raw pointer, which is the same idea as our index-based `ObjRef`.",
+        "With compressed oops, HotSpot stores references as 32-bit numbers and turns them into addresses when needed. A reference is a number, not necessarily a raw pointer, which is the same idea as our index-based `ObjRef`.",
       ],
     },
     concepts: [
       {
-        heading: "Why indexes instead of pointers?",
+        heading: "Why positions instead of pointers?",
         body: [
-          "In C you'd use raw pointers to heap objects. In Rust, raw pointers need `unsafe`, and `Rc<RefCell<...>>` everywhere makes code noisy and can't collect reference cycles. A `Vec<Obj>` plus a `u32` index avoids both problems. References are `Copy`, safe, and 4 bytes, and the garbage collector in lesson 09 is just a walk over that Vec.",
-          "The trade-off is one extra indirection per access (`objects[i]`), plus a bounds check. It's fine for a learning VM, and it's easy to replace later because all access goes through `Heap::get`.",
+          "In C you'd use raw pointers to heap objects. In Rust, raw pointers need `unsafe`, and wrapping everything in `Rc<RefCell<...>>` gets noisy and can't free objects that point at each other. A `Vec` of objects plus a `u32` position avoids both problems: references are small, safe, and freely copyable, and the garbage collector in lesson 09 is just a walk over that `Vec`.",
+          "The cost is one extra lookup per access (`objects[i]`). That's fine for a learning VM, and since all access goes through a few `Heap` methods, it's easy to change later.",
         ],
       },
       {
         heading: "Shapes: how dynamic objects get fixed layouts",
         body: [
-          "A `HashMap` per table is flexible but slow: every `p.x` is a hash lookup. Java avoids this because a class fixes the field layout up front. Dynamic VMs such as V8 and GraalJS recover that speed with **shapes** (also called hidden classes). Tables built with the same fields in the same order share a shape, which maps each name to a slot index, and the table itself stores only a `Vec<Value>` of slots.",
-          "Combined with an **inline cache** (each `GetField` remembers \"last time, this shape had `x` at slot 0\"), a field read becomes a shape check plus an array index, close to Java's `getfield`. Build the simple `HashMap` version first. Shapes are a drop-in upgrade once it works.",
+          "A `HashMap` per table is flexible but slow: every `p.x` is a hash lookup. Java avoids this because a class fixes the field layout ahead of time. Dynamic VMs such as V8 get that speed back with **shapes** (also called hidden classes). Tables built with the same fields in the same order share a shape, which maps each field name to a slot number, and the table itself stores only a `Vec<Value>`.",
+          "Add an **inline cache**, where each `GetField` remembers \"last time, this shape had `x` in slot 0\", and a field read becomes a quick check plus an array index, close to Java's `getfield`. Build the simple `HashMap` version first. Shapes are a drop-in upgrade once it works.",
         ],
         code: {
           lang: "rust",
           caption: "the upgrade, sketched",
           code: `struct Shape {
-    slots: HashMap<ObjRef, usize>,       // field name -> slot index
-    transitions: HashMap<ObjRef, usize>, // "add field f" -> the next shape's id
+    slots: HashMap<ObjRef, usize>,       // field name -> slot number
+    transitions: HashMap<ObjRef, usize>, // "add field f" -> the next shape
 }
 struct Table {
-    shape: usize,       // index into vm.shapes; tables with equal layouts share it
+    shape: usize,       // tables with the same layout share a shape
     values: Vec<Value>, // fields stored by slot, like a Java object's fields
 }`,
         },
       },
     ],
     build: {
-      intro: "Add an `object.rs` module with the heap, then teach `Value`, the compiler and the VM about references.",
+      intro: "A new `object.rs` file for the heap, then small changes to `Value`, the compiler and the VM so they understand references.",
       milestone: "string literals, `+` for joining strings, and table literals with `obj.field` reads and writes.",
       steps: [
         {
-          title: "References and the heap",
-          body: "`ObjRef` is the reference type, and `Heap` owns every object. `intern` makes sure equal strings share one object, so comparing two strings is just comparing two numbers.",
+          section: "Part 1 · The heap",
+          title: "ObjRef and Obj: a reference and the things it can point to",
+          body: "**What they're for:** `ObjRef` is a reference, just a position in the heap. `Obj` lists the kinds of thing that can live in the heap. For now that's strings and tables. Functions and closures join in lessons 07–08.",
           code: {
             lang: "rust",
             caption: "src/object.rs",
             code: `use crate::value::Value;
 use std::collections::HashMap;
 
-/// A reference to a heap object: an index into Heap::objects.
-/// Copy and only 4 bytes, like a compressed JVM reference.
+/// A reference to a heap object: its position in Heap::objects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ObjRef(pub u32);
 
+/// Everything that can live on the heap.
 pub enum Obj {
     Str(String),
     Table(HashMap<ObjRef, Value>), // field name (an interned string) -> value
-    // Function, Closure and Upvalue are added in lessons 07–08
-}
-
-#[derive(Default)]
+}`,
+          },
+          explain: [
+            "`ObjRef(u32)` is a struct that wraps one number. Giving it its own type means Rust won't let you mix it up with an ordinary number by accident.",
+            "It derives `Copy`, so references can be copied around freely, and `Eq` plus `Hash`, so they can be keys in a `HashMap`.",
+            "A table maps field names to values. The names are `ObjRef`s, not `String`s, for the reason explained in the `intern` step.",
+          ],
+        },
+        {
+          title: "The Heap struct and alloc()",
+          body: "**What it's for:** `Heap` owns every object. `alloc` stores a new object and hands back a reference to it, like a cloakroom taking your coat and giving you a ticket.",
+          code: {
+            lang: "rust",
+            caption: "src/object.rs (continued)",
+            code: `#[derive(Default)]
 pub struct Heap {
-    objects: Vec<Option<Obj>>,        // None marks a free slot (used from lesson 09)
+    objects: Vec<Option<Obj>>,        // every object; None will mark a freed slot (lesson 09)
     strings: HashMap<String, ObjRef>, // the intern table: text -> its one shared object
 }
 
 impl Heap {
+    /// Store an object and return a reference to it.
     pub fn alloc(&mut self, obj: Obj) -> ObjRef {
         self.objects.push(Some(obj));
         ObjRef(self.objects.len() as u32 - 1)
     }
-
-    /// Return the one shared object for this text, creating it the first time.
+}`,
+          },
+          explain: [
+            "The new object goes at the end of the list, so its reference is the last position, `len - 1`.",
+            "Each slot is an `Option<Obj>`, which is always `Some` for now. In lesson 09 the garbage collector frees objects by setting their slot to `None` and reusing it.",
+          ],
+        },
+        {
+          title: "intern(): one shared object per piece of text",
+          body: "**What it's for:** making sure equal strings share a single object. Ask for `\"hello\"` twice and you get the same `ObjRef` both times. After that, checking whether two strings are equal is just comparing two numbers.",
+          code: {
+            lang: "rust",
+            caption: "src/object.rs (continued)",
+            code: `impl Heap {
     pub fn intern(&mut self, s: &str) -> ObjRef {
         if let Some(&r) = self.strings.get(s) {
-            return r;
+            return r; // seen this text before: reuse its object
         }
         let r = self.alloc(Obj::Str(s.to_string()));
         self.strings.insert(s.to_string(), r);
         r
     }
-
+}`,
+          },
+          explain: [
+            "The intern table remembers which object holds each piece of text. The first request creates the object, and every later request reuses it.",
+            "This is why table field names can be `ObjRef`s: the name `x` is always the same object, so looking up `x` compares numbers instead of text.",
+          ],
+          jvm: "The JVM interns string *literals* automatically, but strings built while running (`a + b`) aren't interned unless you call `intern()`. Wisp interns every string to keep equality simple. It costs one lookup per new string, and Lua does the same for short strings.",
+        },
+        {
+          title: "get(), get_mut() and show()",
+          body: "**What they're for:** `get` turns a reference back into the object, for reading. `get_mut` does the same for changing it. `show` turns any value into text for `print`. It needs the heap because a reference on its own doesn't contain the string's text.",
+          code: {
+            lang: "rust",
+            caption: "src/object.rs (continued)",
+            code: `impl Heap {
     pub fn get(&self, r: ObjRef) -> &Obj {
         self.objects[r.0 as usize].as_ref().expect("use of a freed object")
     }
@@ -115,27 +154,25 @@ impl Heap {
         self.objects[r.0 as usize].as_mut().expect("use of a freed object")
     }
 
-    /// How \`print\` shows a value. Objects need the heap to be displayed.
     pub fn show(&self, v: Value) -> String {
         match v {
             Value::Obj(r) => match self.get(r) {
                 Obj::Str(s) => s.clone(),
                 Obj::Table(t) => format!("<table with {} fields>", t.len()),
             },
-            other => other.to_string(),
+            other => other.to_string(), // nil, booleans and numbers print as before
         }
     }
 }`,
           },
           explain: [
-            "Because every string is interned, two strings with the same text always have the same `ObjRef`. So `Value`'s derived `==` compares strings correctly with no extra code, and table field names can be `ObjRef`s instead of `String`s.",
-            "`Option<Obj>` costs nothing yet, because every slot is `Some`. In lesson 09 the garbage collector frees objects by setting their slot to `None` and reusing it.",
+            "`r.0` is the number inside the `ObjRef`. `as_ref()` and `as_mut()` look inside the `Option` without taking the object out.",
+            "The `expect` message would only show up if something used a freed object, which the garbage collector is designed to prevent.",
           ],
-          jvm: "The JVM interns string *literals* automatically, but strings built at runtime (`a + b`) are not interned unless you call `intern()`. Wisp interns every string to keep equality simple. It costs a hash lookup per new string, a reasonable price for a scripting language, and Lua does the same for short strings.",
         },
         {
-          title: "A new Value variant",
-          body: "Add one variant to `Value`. It's still `Copy` and still 16 bytes, because the object itself lives in the heap.",
+          title: "Value gets one more option",
+          body: "**What it's for:** letting a Wisp value hold a reference. It's still `Copy` and still 16 bytes, because only the reference lives inside the value, while the object stays on the heap.",
           code: {
             lang: "rust",
             caption: "src/value.rs (changes)",
@@ -148,143 +185,200 @@ pub enum Value {
     Obj(ObjRef), // a string, table, function... anything on the heap
 }
 
-// in Display: there's no heap here, so this is only a fallback (print uses Heap::show)
+// in Display, a fallback: print uses Heap::show instead, which can see the heap
 Value::Obj(r) => write!(f, "<obj #{}>", r.0),`,
           },
         },
         {
-          title: "Compile strings, tables and fields",
-          body: "The compiler now needs the heap, to intern string constants. String literals and field names both become `Value::Obj` constants in the chunk's constant pool.",
+          section: "Part 2 · The compiler",
+          title: "The compiler borrows the heap",
+          body: "**What it's for:** string constants have to be interned, which means the compiler needs access to the VM's heap while it works. `str_const` is a helper that interns a string and adds it to the constant pool in one go.",
           code: {
             lang: "rust",
             caption: "src/compiler.rs (changes)",
-            code: `// The compiler borrows the VM's heap while it runs.
-pub struct Compiler<'h> {
-    // ...chunk, locals, scope_depth, line as before...
-    heap: &'h mut Heap,
+            code: `pub struct Compiler<'h> {
+    // ...chunk, locals, scope_depth and line, as before...
+    heap: &'h mut Heap, // borrowed from the VM while compiling
 }
 
-pub fn compile(program: &[Stmt], heap: &mut Heap) -> Result<Chunk, String> { /* same as before */ }
+pub fn compile(program: &[Stmt], heap: &mut Heap) -> Result<Chunk, String> {
+    // as before, plus \`heap\` when creating the Compiler
+}
 
 impl Compiler<'_> {
-    /// Intern a string and add it to the constant pool.
+    /// Intern a string and put it in the constant pool. Returns its constant number.
     fn str_const(&mut self, s: &str) -> u16 {
         let r = self.heap.intern(s);
         self.chunk.add_const(Value::Obj(r))
     }
-}
-
-// new arms in Compiler::expr
-Expr::Str(s) => {
-    let k = self.str_const(s);
-    self.emit(Op::Const(k));
-}
-Expr::Table(fields) => {
-    self.emit(Op::NewTable);           // [.., t]
-    for (name, value) in fields {
-        self.emit(Op::Dup);            // [.., t, t]
-        self.expr(value)?;             // [.., t, t, v]
-        let k = self.str_const(name);
-        self.emit(Op::SetField(k));    // [.., t, v]   (SetField pops t and v, pushes v)
-        self.emit(Op::Pop);            // [.., t]
-    }
-}
-Expr::Get(obj, name, line) => {
-    self.expr(obj)?;
-    self.line = *line;
-    let k = self.str_const(name);
-    self.emit(Op::GetField(k));        // pop obj, push obj.name
-}
-Expr::Set(obj, name, value, line) => {
-    self.expr(obj)?;
-    self.expr(value)?;
-    self.line = *line;
-    let k = self.str_const(name);
-    self.emit(Op::SetField(k));        // pop value and obj, set the field, push value
-}
-
-// and three new instructions in chunk.rs
-NewTable,          // push an empty table                new
-GetField(u16),     // operand = field-name constant      getfield
-SetField(u16),     //                                    putfield`,
-          },
-          explain: [
-            "The stack comments (`[.., t, t, v]`) are the best way to write stack-machine code. Write the stack state after every instruction and check that each expression ends with exactly one new value.",
-            "`Dup` is reused for table literals. Each field assignment consumes a copy of the table and leaves the original for the next field.",
-            "`main.rs` now creates the VM first and lends its heap to the compiler: `let chunk = compiler::compile(&program, &mut vm.heap)?;` followed by `vm.run(&chunk)`.",
-          ],
-          jvm: "`getfield #5` names its field through the constant pool too: entry #5 is a `Fieldref` pointing at a class and a name. The first time it runs, the JVM resolves that to a fixed byte offset and HotSpot rewrites the instruction into a faster internal version. Shapes plus inline caches are how a classless VM gets the same benefit.",
-        },
-        {
-          title: "Teach the VM about objects",
-          body: "`Add` gets its own arm so it can also join strings. The table instructions do a type check, then a `HashMap` operation. `Print` uses `heap.show`.",
-          code: {
-            lang: "rust",
-            caption: "src/vm.rs (changes)",
-            code: `pub struct Vm {
-    // ...stack, globals as before...
-    pub heap: Heap,
-}
-
-// Add: numbers add, strings join. Remove Op::Add from the shared numeric arm.
-Op::Add => {
-    let (b, a) = (self.pop(), self.pop());
-    let result = match (a, b) {
-        (Value::Num(x), Value::Num(y)) => Value::Num(x + y),
-        (Value::Obj(x), Value::Obj(y)) => {
-            let joined = match (self.heap.get(x), self.heap.get(y)) {
-                (Obj::Str(s1), Obj::Str(s2)) => format!("{s1}{s2}"),
-                _ => return Err(self.error(chunk, ip, "can only add numbers or strings")),
-            };
-            Value::Obj(self.heap.intern(&joined)) // the result is a (new or shared) heap string
-        }
-        _ => return Err(self.error(chunk, ip, "can only add numbers or strings")),
-    };
-    self.push(result);
-}
-
-Op::NewTable => {
-    let t = self.heap.alloc(Obj::Table(HashMap::new()));
-    self.push(Value::Obj(t));
-}
-Op::GetField(k) => {
-    let Value::Obj(name) = chunk.consts[k as usize] else { unreachable!() };
-    let Value::Obj(r) = self.pop() else {
-        return Err(self.error(chunk, ip, "only tables have fields"));
-    };
-    let Obj::Table(fields) = self.heap.get(r) else {
-        return Err(self.error(chunk, ip, "only tables have fields"));
-    };
-    let v = fields.get(&name).copied().unwrap_or(Value::Nil); // a missing field reads as nil
-    self.push(v);
-}
-Op::SetField(k) => {
-    let Value::Obj(name) = chunk.consts[k as usize] else { unreachable!() };
-    let value = self.pop();
-    let Value::Obj(r) = self.pop() else {
-        return Err(self.error(chunk, ip, "only tables have fields"));
-    };
-    let Obj::Table(fields) = self.heap.get_mut(r) else {
-        return Err(self.error(chunk, ip, "only tables have fields"));
-    };
-    fields.insert(name, value); // creates the field if it's new
-    self.push(value);           // assignment is an expression
-}
-
-Op::Print => {
-    let v = self.pop();
-    println!("{}", self.heap.show(v));
 }`,
           },
           explain: [
-            "In `Add`, the inner `match` only *reads* the two strings to build `joined`. The borrow of the heap ends there, so the next line can call `intern`, which needs mutable access. Splitting reads and writes like this is the usual way to satisfy the borrow checker in a VM.",
-            "Missing fields read as `nil` rather than raising an error. That's the Lua and JavaScript convention, and it makes optional fields easy. It's a language choice, so pick the one you prefer.",
-            "Tables are reference values. `let a = {x: 1}  let b = a  b.x = 2  print a.x` prints `2`, because both variables hold the same `ObjRef`, exactly as two Java variables can point at one object.",
+            "`<'h>` is a **lifetime**: it tells Rust the compiler only borrows the heap and must not outlive it. You don't need to think about it beyond writing it in these two places.",
+            "Because interned strings are unique, `add_const`'s duplicate check also works for strings: `\"hi\"` used twice takes one pool slot.",
           ],
         },
         {
-          title: "Try it",
-          body: "Strings, tables and field updates now work end to end.",
+          title: "Arms: string and table literals",
+          body: "**What they do:** a string literal becomes a `Const` that loads the interned string. A table literal creates an empty table, then sets each field in turn, leaving the finished table on the stack.",
+          code: {
+            lang: "rust",
+            caption: "src/compiler.rs · inside expr's match",
+            code: `            Expr::Str(s) => {
+                let k = self.str_const(s);
+                self.emit(Op::Const(k));
+            }
+            Expr::Table(fields) => {
+                self.emit(Op::NewTable);           // stack: [.., t]
+                for (name, value) in fields {
+                    self.emit(Op::Dup);            // [.., t, t]
+                    self.expr(value)?;             // [.., t, t, v]
+                    let k = self.str_const(name);
+                    self.emit(Op::SetField(k));    // [.., t, v]  (sets t.name = v, keeps v)
+                    self.emit(Op::Pop);            // [.., t]
+                }
+            }`,
+          },
+          explain: [
+            "The comments show the stack after each instruction. Writing those down is the easiest way to get stack code right: check that the expression ends with exactly one new value.",
+            "`Dup` makes a spare copy of the table for each field, because `SetField` uses one up. The original stays underneath for the next field.",
+          ],
+        },
+        {
+          title: "Arms: reading and writing fields",
+          body: "**What they do:** `obj.field` pushes the object, then `GetField` replaces it with the field's value. `obj.field = value` pushes the object and the value, then `SetField` stores it. Three new instructions support this.",
+          code: {
+            lang: "rust",
+            caption: "src/compiler.rs · inside expr's match",
+            code: `            Expr::Get(obj, name, line) => {
+                self.expr(obj)?;
+                self.line = *line;
+                let k = self.str_const(name);
+                self.emit(Op::GetField(k));        // pop obj, push obj.name
+            }
+            Expr::Set(obj, name, value, line) => {
+                self.expr(obj)?;
+                self.expr(value)?;
+                self.line = *line;
+                let k = self.str_const(name);
+                self.emit(Op::SetField(k));        // pop value and obj, set the field, push value
+            }
+
+// and three new variants in Op (chunk.rs):
+//     NewTable,       // push an empty table           ≈ new
+//     GetField(u16),  // operand = field-name constant ≈ getfield
+//     SetField(u16),  //                               ≈ putfield`,
+          },
+          jvm: "`getfield #5` names its field through the constant pool too. The first time it runs, the JVM works out the field's fixed position in the object, and HotSpot rewrites the instruction into a faster internal form. Shapes plus inline caches are how a classless VM gets the same benefit.",
+        },
+        {
+          section: "Part 3 · The VM",
+          title: "The VM owns the heap",
+          body: "**What it's for:** the heap belongs to the VM, which lends it to the compiler before running. `main.rs` changes to create the VM first.",
+          code: {
+            lang: "rust",
+            caption: "src/vm.rs and src/main.rs (changes)",
+            code: `pub struct Vm {
+    // ...stack and globals, as before...
+    pub heap: Heap,
+}
+// in Vm::new():  heap: Heap::default(),
+
+// in run() in main.rs:
+let mut vm = vm::Vm::new();
+let chunk = compiler::compile(&program, &mut vm.heap)?; // compiler borrows the heap...
+vm.run(&chunk)                                          // ...then the VM uses it`,
+          },
+        },
+        {
+          title: "Arm: Add handles numbers and strings",
+          body: "**What it does:** `Add` needs its own arm now, because `\"a\" + \"b\"` should join the strings. Remove `Op::Add` from the shared arithmetic arm and add this one.",
+          code: {
+            lang: "rust",
+            caption: "src/vm.rs · inside run's match",
+            code: `                Op::Add => {
+                    let b = self.pop();
+                    let a = self.pop();
+                    let result = match (a, b) {
+                        (Value::Num(x), Value::Num(y)) => Value::Num(x + y),
+                        (Value::Obj(x), Value::Obj(y)) => {
+                            // read both strings and build the joined text...
+                            let joined = match (self.heap.get(x), self.heap.get(y)) {
+                                (Obj::Str(s1), Obj::Str(s2)) => format!("{s1}{s2}"),
+                                _ => return Err(self.error(chunk, ip, "can only add numbers or strings")),
+                            };
+                            // ...then store it as a (new or shared) heap string
+                            Value::Obj(self.heap.intern(&joined))
+                        }
+                        _ => return Err(self.error(chunk, ip, "can only add numbers or strings")),
+                    };
+                    self.push(result);
+                }`,
+          },
+          explain: [
+            "`match (a, b)` looks at both values at once and picks the case that fits: two numbers, two heap objects, or anything else.",
+            "Reading and writing are kept separate on purpose. The inner `match` only *reads* the two strings to build `joined`. Once that's done, the heap isn't being read any more, so `intern` is allowed to change it. Rust's borrow checker insists on this split.",
+          ],
+        },
+        {
+          title: "Arms: NewTable and GetField",
+          body: "**What they do:** `NewTable` creates an empty table on the heap and pushes a reference to it. `GetField` pops a table, looks up the field, and pushes the value it finds, or `nil` if there's no such field.",
+          code: {
+            lang: "rust",
+            caption: "src/vm.rs · inside run's match",
+            code: `                Op::NewTable => {
+                    let t = self.heap.alloc(Obj::Table(HashMap::new()));
+                    self.push(Value::Obj(t));
+                }
+                Op::GetField(k) => {
+                    let Value::Obj(name) = chunk.consts[k as usize] else { unreachable!() };
+                    let Value::Obj(r) = self.pop() else {
+                        return Err(self.error(chunk, ip, "only tables have fields"));
+                    };
+                    let Obj::Table(fields) = self.heap.get(r) else {
+                        return Err(self.error(chunk, ip, "only tables have fields"));
+                    };
+                    let v = fields.get(&name).copied().unwrap_or(Value::Nil); // missing field: nil
+                    self.push(v);
+                }`,
+          },
+          explain: [
+            "The field name comes from the constant pool, where the compiler put it as an interned string.",
+            "Two checks give clear errors: the value must be a heap object, and that object must be a table. `5.x` and `\"text\".x` both fail with \"only tables have fields\".",
+            "Reading a missing field gives `nil`, the Lua and JavaScript convention. It's a language choice, so pick the one you prefer.",
+          ],
+        },
+        {
+          title: "Arms: SetField and Print",
+          body: "**What they do:** `SetField` pops the value and the table, stores the field (creating it if it's new), and pushes the value back as the result of the assignment. `Print` now uses `heap.show`, so strings print their text.",
+          code: {
+            lang: "rust",
+            caption: "src/vm.rs · inside run's match",
+            code: `                Op::SetField(k) => {
+                    let Value::Obj(name) = chunk.consts[k as usize] else { unreachable!() };
+                    let value = self.pop();
+                    let Value::Obj(r) = self.pop() else {
+                        return Err(self.error(chunk, ip, "only tables have fields"));
+                    };
+                    let Obj::Table(fields) = self.heap.get_mut(r) else {
+                        return Err(self.error(chunk, ip, "only tables have fields"));
+                    };
+                    fields.insert(name, value); // adds the field if it's new
+                    self.push(value);           // assignment is an expression
+                }
+                Op::Print => {
+                    let v = self.pop();
+                    println!("{}", self.heap.show(v));
+                }`,
+          },
+          explain: [
+            "Tables are shared by reference. After `let a = {x: 1}  let b = a  b.x = 2`, printing `a.x` gives `2`: both variables hold the same `ObjRef`, just as two Java variables can point to one object.",
+          ],
+        },
+        {
+          section: "Part 4 · Try it",
+          title: "Strings and tables, end to end",
+          body: "Run this script to check every new piece at once.",
           code: {
             lang: "wisp",
             caption: "objects.wisp",
@@ -310,24 +404,24 @@ nil`,
         q: "If Wisp has no classes, how do I share methods between objects?",
         intuition: "Give each object a link to a \"parent\" object. When a field isn't found on the object, look in its parent. JavaScript and Lua work this way.",
         technical:
-          "That's **prototype delegation**. Add an optional `proto: Option<ObjRef>` to tables and make `GetField` follow the chain on a miss. Store functions in the prototype and pass the receiver as a hidden first argument (`self`). With shapes and inline caches, prototype lookups can be cached just like own-field lookups.",
+          "That's **prototype delegation**. Add an optional `proto: Option<ObjRef>` to tables, and make `GetField` follow the chain when a field is missing. Store functions on the prototype and pass the object as a hidden first argument (`self`). With shapes and inline caches, prototype lookups can be cached just like normal field reads.",
       },
       {
         q: "Why intern every string? Isn't that slow?",
-        intuition: "It costs a little when a string is created and saves a lot every time strings are compared or used as field names, which happens far more often.",
+        intuition: "It costs a little when a string is created, and saves a lot every time strings are compared or used as field names, which happens far more often.",
         technical:
-          "Without interning, string `==` is a byte-by-byte comparison and table keys must be hashed on every lookup. With interning, both are integer comparisons. The cost is one hash lookup when creating a string, and the intern table must be weak so it doesn't keep dead strings alive. Lesson 09 handles that.",
+          "Without interning, string `==` compares every character, and table keys must be hashed on every lookup. With interning, both become integer comparisons. The cost is one hash lookup per new string, and the intern table must not keep unused strings alive. Lesson 09 handles that.",
       },
       {
         q: "How big is a Java object compared with a Wisp table?",
         intuition: "A small Java object is usually 16–24 bytes. A Wisp table with a `HashMap` is several times bigger, which is the price of being able to add fields at any time.",
         technical:
-          "HotSpot uses a 12-byte header (with compressed class pointers) plus packed fields, padded to 8 bytes. A Rust `HashMap` is 48 bytes before allocating any buckets, and each entry costs more on top. Shapes fix this as well, because a table becomes a shape id plus a `Vec<Value>` of exactly its fields.",
+          "HotSpot uses a 12-byte header (with compressed class pointers) plus tightly packed fields, rounded up to 8 bytes. A Rust `HashMap` is 48 bytes before it stores anything, plus more per field. Shapes fix this too: a table becomes a shape number plus a `Vec<Value>` of exactly its fields.",
       },
     ],
     references: [
       ci("Strings", "strings", "Heap objects and string values in C."),
-      ci("Hash Tables", "hash-tables", "Interning and building your own hash table."),
+      ci("Hash Tables", "hash-tables", "Interning, and building your own hash table."),
       { title: "JVM Anatomy Quark #23: Compressed References", by: "Aleksey Shipilëv", url: "https://shipilev.net/jvm/anatomy-quarks/23-compressed-references/", kind: "article", note: "How HotSpot fits references in 32 bits." },
     ],
   },
@@ -342,26 +436,26 @@ nil`,
     summary: "Compile each function to its own chunk and add call frames: CALL and RETURN, arguments as local slots, and stack overflow, mirroring invokestatic.",
     tags: ["Function objects", "Call frames", "Calling convention", "Stack overflow"],
     intro: [
-      "A JVM thread's stack is a stack of **frames**, one per method call in progress. Each frame has its own locals, its own operand stack and its own program counter. Calling a method pushes a frame, and returning pops it. That's all a call is.",
-      "In this lesson Wisp gets the same thing. Each function compiles to its own chunk and becomes a heap object, and the VM keeps a stack of `CallFrame`s. A frame doesn't need its own stack, though. It's just a **window** into the one shared value stack, starting where its arguments were pushed.",
+      "A JVM thread keeps a stack of **frames**, one per function call that hasn't finished yet. Each frame remembers which function it's running and where it's up to. Calling a function adds a frame, and returning removes it. That's really all a call is.",
+      "In this lesson Wisp gets the same thing. Each function compiles into its own chunk and becomes a heap object, and the VM keeps a list of `CallFrame`s. A frame doesn't need its own separate stack: it's just a **window** onto the shared value stack, starting where its arguments were pushed.",
     ],
     sim: "heap-stack",
     simTitle: "Frames on the stack, objects on the heap",
     jvm: {
       title: "What JVM calls teach us",
       points: [
-        "`invokestatic` pops the arguments off the caller's operand stack, and they become the callee's local variables 0, 1, 2 and so on. In HotSpot's interpreter they aren't even copied: the callee's local area simply overlaps the caller's stack where the arguments already are.",
-        "Each frame records a return address, which is where the caller should resume. Our frame stores the caller's `ip` for the same reason.",
-        "Thread stacks have a fixed size (`-Xss`). Infinite recursion fills it and throws `StackOverflowError`, which you can catch.",
-        "A method's arity and types are checked when it's linked, not on every call. Wisp is dynamic, so it checks the argument count at the call instead.",
+        "`invokestatic` takes the arguments off the caller's stack, and they become the called method's local variables 0, 1, 2 and so on. In HotSpot's interpreter they aren't even copied: the new frame's locals simply start where the arguments already are.",
+        "Each frame records where the caller should continue when this call returns. Our frame stores the caller's `ip` for the same reason.",
+        "Each thread's stack has a fixed size (`-Xss`). Infinite recursion fills it and throws `StackOverflowError`.",
+        "Java checks a method's argument types once, when the call is first linked. Wisp is dynamic, so it checks the argument count on every call instead.",
       ],
     },
     concepts: [
       {
-        heading: "The calling convention",
+        heading: "How a call lays out the stack",
         body: [
-          "A call compiles to: push the function, push each argument, then `Call(argc)`. When `Call` runs, the stack looks like `[.., fn, arg0, arg1]`. The new frame's `base` is the index of `arg0`, so inside the function, `GetLocal(0)` is the first argument, `GetLocal(1)` the second, and any `let` inside the body continues at slot 2, 3 and so on. No copying is needed.",
-          "On `Return`, the VM pops the result, cuts the stack back to just below `fn` (removing the arguments, the locals and the function itself), and pushes the result. The caller sees exactly what any expression leaves behind: one value where the call was.",
+          "A call compiles to: push the function, push each argument, then `Call(argc)`. When `Call` runs, the stack looks like `[.., fn, arg0, arg1]`. The new frame's `base` is the position of `arg0`. Inside the function, `GetLocal(0)` is the first argument, `GetLocal(1)` the second, and any `let` inside the body continues at slot 2, 3 and so on. Nothing gets copied.",
+          "On `Return`, the VM pops the result, cuts the stack back to just below `fn` (removing the arguments, the locals and the function itself), and pushes the result. The caller sees what any expression leaves behind: one value where the call was.",
         ],
         code: {
           lang: "text",
@@ -375,12 +469,13 @@ after Return:  [ ..., 5 ]`,
       },
     ],
     build: {
-      intro: "The compiler learns to compile nested functions, and the VM learns to switch between frames.",
+      intro: "The compiler learns to compile one function inside another, and the VM learns to switch between frames.",
       milestone: "named functions, recursion and `return`. `fib(25)` runs.",
       steps: [
         {
-          title: "A Function object",
-          body: "A compiled function is its chunk plus a name (for error messages) and an arity (for checking calls). It lives on the heap so it can be stored in variables and passed around like any other value.",
+          section: "Part 1 · Function objects",
+          title: "The Function struct",
+          body: "**What it's for:** a compiled function: its name (for error messages), how many arguments it expects, and its own chunk of code. It lives on the heap so it can be stored in variables and passed around like any other value.",
           code: {
             lang: "rust",
             caption: "src/object.rs (changes)",
@@ -390,30 +485,28 @@ use std::rc::Rc;
 pub struct Function {
     pub name: String,
     pub arity: u8,    // how many arguments it expects
-    pub chunk: Chunk, // its own code, constants and line table
+    pub chunk: Chunk, // its own instructions, constants and line numbers
 }
 
-pub enum Obj {
-    Str(String),
-    Table(HashMap<ObjRef, Value>),
-    Function(Rc<Function>), // why Rc: see the VM step below
-}
+// a new variant in enum Obj:
+Function(Rc<Function>),
 
-// in Heap::show
+// and a new case in Heap::show:
 Obj::Function(f) => format!("<fn {}>", f.name),`,
           },
           explain: [
-            "Functions never change after compiling, so sharing them through `Rc` is safe and cheap. It also solves a borrow-checker problem in the VM, explained below.",
+            "`Rc` (reference counted) lets several owners share one value. A function never changes after it's compiled, so sharing it is safe. The VM step below explains why sharing is useful.",
           ],
-          jvm: "This is the JVM's `Method` structure: bytecode, constant-pool access, `max_locals` and a parameter count, all kept in metaspace. A Wisp function is a value you can pass around, but its compiled body plays the same role as a `Method`.",
+          jvm: "This plays the role of the JVM's internal `Method` structure: bytecode, a link to the constant pool, and an argument count.",
         },
         {
-          title: "Compile one function at a time, with a stack of compilers",
-          body: "While compiling a function body, the compiler needs a fresh chunk and a fresh set of locals, and afterwards it must get the outer ones back. So move those fields into a `FnState` and keep a stack of them. The innermost one is always `self.cur()`.",
+          section: "Part 2 · The compiler",
+          title: "FnState: everything that belongs to one function",
+          body: "**What it's for:** while compiling a function body, the compiler needs a fresh chunk and a fresh list of locals. Afterwards it must go back to the outer ones. So those fields move into a `FnState` struct, and the compiler keeps a stack of them.",
           code: {
             lang: "rust",
             caption: "src/compiler.rs (changes)",
-            code: `/// Everything that's per-function. (These were Compiler's fields in lesson 05.)
+            code: `/// These were the Compiler's own fields in lesson 05.
 struct FnState {
     chunk: Chunk,
     locals: Vec<Local>,
@@ -424,40 +517,62 @@ impl FnState {
     fn new(scope_depth: usize) -> Self {
         FnState { chunk: Chunk::default(), locals: Vec::new(), scope_depth }
     }
+
+    /// resolve_local moves here: it searches this function's locals only.
     fn resolve_local(&self, name: &str) -> Option<u16> {
         self.locals.iter().rposition(|l| l.name == name).map(|i| i as u16)
     }
-}
-
-pub struct Compiler<'h> {
+}`,
+          },
+        },
+        {
+          title: "The Compiler holds a stack of FnStates",
+          body: "**What it's for:** the innermost function being compiled is always the last entry, and `cur()` returns it. `compile` now starts with one `FnState` for the top-level script and returns the script as a function object.",
+          code: {
+            lang: "rust",
+            caption: "src/compiler.rs (changes)",
+            code: `pub struct Compiler<'h> {
     fns: Vec<FnState>, // innermost function last
     heap: &'h mut Heap,
     line: u32,
 }
 
-/// The whole script is compiled as one function, the implicit "main".
 pub fn compile(program: &[Stmt], heap: &mut Heap) -> Result<ObjRef, String> {
     let mut c = Compiler { fns: vec![FnState::new(0)], heap, line: 1 };
     for s in program {
         c.stmt(s)?;
     }
-    Ok(c.finish("script", 0))
+    Ok(c.finish("script", 0)) // the whole script is a function too
 }
 
 impl Compiler<'_> {
+    /// The function we're compiling right now.
     fn cur(&mut self) -> &mut FnState {
         self.fns.last_mut().unwrap()
     }
+
     fn emit(&mut self, op: Op) -> usize {
         let line = self.line;
         self.cur().chunk.emit(op, line)
     }
-
-    /// Compile a function body into its own chunk.
+}`,
+          },
+          explain: [
+            "Every `self.chunk` in the lesson 05 code becomes `self.cur().chunk`, and the same goes for `locals` and `scope_depth`. It's a mechanical find-and-replace: the compiler always writes into the innermost function.",
+            "Treating the top-level script as a function named `script` means the VM needs no special case for the outermost code.",
+          ],
+        },
+        {
+          title: "function(): compile a function body",
+          body: "**What it's for:** compiling `fn name(params) { body }` into its own chunk. It pushes a fresh `FnState`, registers the parameters as the first locals, compiles the body, and then calls `finish`.",
+          code: {
+            lang: "rust",
+            caption: "src/compiler.rs (continued)",
+            code: `impl Compiler<'_> {
     fn function(&mut self, name: &str, params: &[String], body: &[Stmt]) -> Result<ObjRef, String> {
-        let mut state = FnState::new(1); // depth 1: a function body is never "top level"
+        let mut state = FnState::new(1); // depth 1: a function body is never the top level
         for p in params {
-            // arguments are the first locals: slots 0, 1, 2...
+            // parameters are the first locals: slots 0, 1, 2...
             state.locals.push(Local { name: p.clone(), depth: 1 });
         }
         self.fns.push(state);
@@ -466,9 +581,22 @@ impl Compiler<'_> {
         }
         Ok(self.finish(name, params.len() as u8))
     }
-
-    /// End the innermost function: add an implicit \`return nil\` and move it to the heap.
+}`,
+          },
+          explain: [
+            "Parameters get slots 0, 1, 2 before any code runs. That matches where the VM will find the arguments: the call left them on the stack in exactly that order.",
+            "Starting at depth 1 means `let` inside a function always makes a local, never a global.",
+          ],
+        },
+        {
+          title: "finish(): seal the function and put it on the heap",
+          body: "**What it's for:** ending a function. It adds an automatic `return nil` at the end, removes the function's `FnState` (returning to the enclosing function), and stores the result on the heap as a `Function` object.",
+          code: {
+            lang: "rust",
+            caption: "src/compiler.rs (continued)",
+            code: `impl Compiler<'_> {
     fn finish(&mut self, name: &str, arity: u8) -> ObjRef {
+        // a function that runs off its end returns nil
         self.emit(Op::Nil);
         self.emit(Op::Return);
         let state = self.fns.pop().unwrap(); // back to the enclosing function
@@ -478,84 +606,99 @@ impl Compiler<'_> {
 }`,
           },
           explain: [
-            "Every `self.chunk` in the lesson 05 code becomes `self.cur().chunk`, and the same goes for `locals` and `scope_depth`. It's a mechanical change: the compiler now always writes into the innermost function.",
-            "The implicit `Nil, Return` at the end means a function that falls off its end returns `nil`. If the body already returned, those two instructions are simply never reached.",
-            "The top-level script is also a function, named `script`. Treating it like any other function means the VM needs no special case for the outermost code.",
+            "If the body already returned, those last two instructions are simply never reached. Adding them anyway is simpler than working out whether every path returns.",
           ],
         },
         {
-          title: "Compile declarations, calls and return",
-          body: "A `fn` declaration compiles its body into a new function object, puts that object in the constant pool, and then stores it in a variable like any other value.",
+          title: "Arm: fn declarations",
+          body: "**What it does:** compiles the body into a function object, puts that object in the current chunk's constant pool, and pushes it with `Const`. Then it's stored in a variable like any other value: a global at the top level, a local inside a block.",
           code: {
             lang: "rust",
-            caption: "src/compiler.rs (new arms)",
-            code: `// in stmt()
-Stmt::Fn(name, params, body) => {
-    let depth = self.cur().scope_depth;
-    if depth > 0 {
-        // a local function: claim its slot before compiling the body, so the
-        // value pushed below lands in exactly that slot
-        self.cur().locals.push(Local { name: name.clone(), depth });
-    }
-    let f = self.function(name, params, body)?;
-    let k = self.cur().chunk.add_const(Value::Obj(f));
-    self.emit(Op::Const(k)); // push the function value (lesson 08 changes this to Op::Closure)
-    if depth == 0 {
-        let n = self.cur().chunk.add_name(name);
-        self.emit(Op::DefineGlobal(n));
-    }
-}
-Stmt::Return(value) => {
-    match value {
-        Some(e) => self.expr(e)?,
-        None => { self.emit(Op::Nil); }
-    }
-    self.emit(Op::Return);
-}
-
-// in expr()
-Expr::Call(callee, args, line) => {
-    self.expr(callee)?;            // [.., f]
-    for a in args {
-        self.expr(a)?;             // [.., f, a0, a1, ...]
-    }
-    self.line = *line;
-    self.emit(Op::Call(args.len() as u8));
-}
-
-// and one new instruction in chunk.rs
-Call(u8), // operand = argument count            invokestatic / invokevirtual`,
+            caption: "src/compiler.rs · inside stmt's match",
+            code: `            Stmt::Fn(name, params, body) => {
+                let depth = self.cur().scope_depth;
+                if depth > 0 {
+                    // a local function: claim its slot BEFORE compiling the body,
+                    // so the value pushed below lands in exactly that slot
+                    self.cur().locals.push(Local { name: name.clone(), depth });
+                }
+                let f = self.function(name, params, body)?;
+                let k = self.cur().chunk.add_const(Value::Obj(f));
+                self.emit(Op::Const(k)); // (lesson 08 changes this to Op::Closure)
+                if depth == 0 {
+                    let n = self.cur().chunk.add_name(name);
+                    self.emit(Op::DefineGlobal(n));
+                }
+            }`,
           },
           explain: [
-            "Functions are constants, like numbers. The compiled body of `fib` sits in the script chunk's constant pool, and `Const(k)` pushes it at runtime.",
-            "Global functions can call themselves recursively for free: by the time `fib` runs, `DefineGlobal` has stored it, so the `GetGlobal(\"fib\")` inside its body finds it.",
+            "Functions are constants, just like numbers. The compiled body of `fib` sits in the script's constant pool, and `Const(k)` pushes it when that line runs.",
+            "Recursion needs no special handling for global functions. By the time `fib` runs, `DefineGlobal` has stored it, so the `GetGlobal(\"fib\")` inside its own body finds it.",
           ],
         },
         {
-          title: "Call frames in the VM",
-          body: "The VM keeps a `Vec<CallFrame>`. The current frame's `func`, `ip` and `base` are copied into local variables, because they're used on every instruction. `Call` and `Return` are the only places that switch them.",
+          title: "Arms: return and calls",
+          body: "**What they do:** `return` computes its value (or `nil`) and emits `Return`. A call pushes the function, then each argument, then emits `Call` with the number of arguments.",
+          code: {
+            lang: "rust",
+            caption: "src/compiler.rs · inside stmt's and expr's matches",
+            code: `            // in stmt():
+            Stmt::Return(value) => {
+                match value {
+                    Some(e) => self.expr(e)?,
+                    None => {
+                        self.emit(Op::Nil);
+                    }
+                }
+                self.emit(Op::Return);
+            }
+
+            // in expr():
+            Expr::Call(callee, args, line) => {
+                self.expr(callee)?;        // [.., f]
+                for a in args {
+                    self.expr(a)?;         // [.., f, a0, a1, ...]
+                }
+                self.line = *line;
+                self.emit(Op::Call(args.len() as u8));
+            }
+
+// a new variant in Op:  Call(u8),  // operand = argument count  ≈ invokestatic`,
+          },
+        },
+        {
+          section: "Part 3 · The VM",
+          title: "CallFrame: one entry per call in progress",
+          body: "**What it's for:** a frame remembers three things about a call: which function is running, where to continue in it (`ip`), and where its window on the stack starts (`base`). The VM keeps a list of frames: the last one is the call running now.",
           code: {
             lang: "rust",
             caption: "src/vm.rs (changes)",
             code: `struct CallFrame {
     func: Rc<Function>, // the function running in this frame
-    ip: usize,          // where to resume (saved when this frame makes a call)
-    base: usize,        // stack index of this frame's slot 0 (its first argument)
+    ip: usize,          // where to continue (saved when this frame calls another)
+    base: usize,        // stack position of this frame's slot 0, its first argument
 }
 
 pub struct Vm {
     stack: Vec<Value>,
-    frames: Vec<CallFrame>,
+    frames: Vec<CallFrame>, // the call stack: last = currently running
     globals: HashMap<String, Value>,
     pub heap: Heap,
-}
-
-impl Vm {
+}`,
+          },
+          jvm: "A JVM frame holds the same three things: the method, the saved bytecode position, and the start of the frame's locals.",
+        },
+        {
+          title: "run(): start with the script's frame",
+          body: "**What it's for:** `run` now receives the script function. It copies the current frame's details into three local variables, `func`, `ip` and `base`, because every instruction uses them. Locals are now counted from `base`.",
+          code: {
+            lang: "rust",
+            caption: "src/vm.rs (changes)",
+            code: `impl Vm {
     pub fn run(&mut self, script: ObjRef) -> Result<(), String> {
         let Obj::Function(f) = self.heap.get(script) else { unreachable!() };
-        // The "hot" state of the current frame, kept in locals for speed.
-        // Cloning the Rc means reading func.chunk doesn't borrow self.
-        let mut func = f.clone();
+        // the running frame's details, kept in locals because they're used constantly
+        let mut func = f.clone(); // clone the Rc: a second handle on the same function
         let mut ip = 0;
         let mut base = 0;
         self.frames.push(CallFrame { func: func.clone(), ip, base });
@@ -564,13 +707,30 @@ impl Vm {
             let op = func.chunk.code[ip];
             ip += 1;
             match op {
-                // locals are now relative to the frame's base
+                // every existing arm stays, with \`chunk\` replaced by \`func.chunk\`
+                // locals are now counted from the frame's base:
                 Op::GetLocal(slot) => self.push(self.stack[base + slot as usize]),
                 Op::SetLocal(slot) => self.stack[base + slot as usize] = self.peek(0),
-
-                Op::Call(argc) => {
+                // ...plus the Call and Return arms from the next two steps
+            }
+        }
+    }
+}`,
+          },
+          explain: [
+            "**Why clone the `Rc`?** If `func` pointed into `self.heap`, Rust wouldn't let any instruction change `self` (push to the stack, allocate) while that pointer existed. Cloning an `Rc` gives the loop its own handle to the function. It costs one counter increment.",
+            "`base + slot` turns \"this function's local 2\" into an actual stack position.",
+          ],
+        },
+        {
+          title: "Arm: Call",
+          body: "**What it does:** checks that the value being called really is a function and got the right number of arguments. Then it saves where the caller should continue, and switches the three locals over to the new function. The next pass of the loop runs the function's first instruction.",
+          code: {
+            lang: "rust",
+            caption: "src/vm.rs · inside run's match",
+            code: `                Op::Call(argc) => {
                     let argc = argc as usize;
-                    // the stack is [.., callee, arg0 .. argN]: the callee sits below its args
+                    // 1. CHECK: the callee sits just below its arguments
                     let Value::Obj(r) = self.peek(argc) else {
                         return Err(self.error(&func.chunk, ip, "can only call functions"));
                     };
@@ -585,49 +745,54 @@ impl Vm {
                         return Err(self.error(&func.chunk, ip, "stack overflow"));
                     }
                     let callee = callee.clone();
-                    // 1. remember where the caller resumes
+                    // 2. SAVE where the caller continues
                     self.frames.last_mut().unwrap().ip = ip;
-                    // 2. switch the hot state to the callee
+                    // 3. SWITCH to the callee
                     func = callee;
                     ip = 0;
-                    base = self.stack.len() - argc; // the args already sit in slots 0..argc
+                    base = self.stack.len() - argc; // the arguments are already in slots 0..argc
                     self.frames.push(CallFrame { func: func.clone(), ip, base });
-                }
-
-                Op::Return => {
+                }`,
+          },
+          explain: [
+            "`self.peek(argc)` looks past the arguments to the value under them: the thing being called.",
+            "The frame limit turns infinite recursion into a Wisp error instead of the program using up all its memory. 1024 is an arbitrary number, so pick any limit you like.",
+            "`base = stack.len() - argc` is the whole calling convention: the arguments are already sitting exactly where the new function expects its first locals.",
+            "The caller's `ip` is only saved here, at the moment of the call. While a function runs, its `ip` lives only in the local variable, which is the speed trick from lesson 04 again.",
+          ],
+        },
+        {
+          title: "Arm: Return",
+          body: "**What it does:** pops the result, removes the finished frame, clears that call's part of the stack, and pushes the result for the caller. Then it switches the three locals back to the caller's frame, so the loop carries on right after the caller's `Call`.",
+          code: {
+            lang: "rust",
+            caption: "src/vm.rs · inside run's match",
+            code: `                Op::Return => {
                     let result = self.pop();
                     self.frames.pop();
                     if self.frames.is_empty() {
                         return Ok(()); // the script itself has finished
                     }
-                    // drop the callee's locals and args, *and* the callee value just below them
+                    // remove the callee's locals and arguments, AND the function value below them
                     self.stack.truncate(base - 1);
                     self.push(result);
-                    // switch the hot state back to the caller
+                    // switch back to the caller
                     let caller = self.frames.last().unwrap();
                     func = caller.func.clone();
                     ip = caller.ip;
                     base = caller.base;
-                }
-
-                // ...every other arm as before, with \`chunk\` replaced by \`func.chunk\`
-            }
-        }
-    }
-}`,
+                }`,
           },
           explain: [
-            "**Why `Rc`?** If `func` were a reference into `self.heap`, the borrow checker wouldn't let any instruction mutate `self` (pushing to the stack, allocating) while that reference exists. Cloning an `Rc` gives the loop its own handle to the function. It costs one counter increment per call.",
-            "`base = stack.len() - argc` is the whole calling convention. The arguments are already in place, so slot 0 is the first argument. Nothing is copied.",
-            "`truncate(base - 1)` removes everything from the callee value upward. The caller is left exactly as if the call expression had pushed one value: the result.",
-            "The frame limit turns infinite recursion into a Wisp error instead of the Rust process running out of memory. 1024 is arbitrary, so pick any limit.",
-            "Writing `ip` back into the frame happens only on `Call`. While a function runs, its `ip` lives only in the local variable, which is the HotSpot trick from lesson 04 again.",
+            "`truncate(base - 1)` cuts the stack back to just before the function value. After pushing `result`, the caller sees exactly one new value where the call expression was.",
+            "`base` still holds the *finished* call's base when `truncate` runs, which is why the switch back to the caller happens last.",
           ],
-          jvm: "HotSpot does the same switch: on `invokestatic` it saves the bytecode pointer in the current frame, builds the new frame with its locals over the arguments, and jumps to the callee's first bytecode. On `ireturn` it pops the frame, pushes the result onto the caller's operand stack, and reloads the caller's saved bytecode pointer.",
+          jvm: "HotSpot does the same on `ireturn`: pop the frame, push the result onto the caller's operand stack, and continue at the caller's saved position.",
         },
         {
-          title: "Try it",
-          body: "Update `main.rs` so `compile` returns the script function and `vm.run(script)` runs it. Recursion now works.",
+          section: "Part 4 · Try it",
+          title: "Recursion and stack overflow",
+          body: "Update `main.rs` so `compile` returns the script function and `vm.run(script)` runs it.",
           code: {
             lang: "wisp",
             caption: "fib.wisp",
@@ -642,35 +807,33 @@ forever(0)`,
           },
           output: `75025
 [line 7] runtime error: stack overflow`,
-          explain: [
-            "`fib(25)` makes about 250,000 calls. Time it with `--release` and keep the number. It's your benchmark for the performance lesson.",
-          ],
+          explain: ["`fib(25)` makes about 250,000 calls. Time it with `cargo run --release` and keep the number: it's your benchmark for lesson 13."],
         },
       ],
     },
     questions: [
       {
         q: "Why one shared stack instead of a separate stack per call?",
-        intuition: "Arguments are already on the caller's stack, so letting the callee use them right where they are means no copying. A frame is just a bookmark into the shared stack.",
+        intuition: "The arguments are already on the caller's stack, so letting the called function use them right where they are means no copying. A frame is just a bookmark into the shared stack.",
         technical:
-          "With per-frame stacks, every call would allocate and copy the arguments. The shared stack makes calls cost one push to `frames` plus a few integer updates. It does mean nothing may hold a Rust reference into `stack` across a call, because it might reallocate. Indices (`base + slot`) avoid that problem completely.",
+          "With a stack per frame, every call would allocate and copy its arguments. The shared stack makes a call cost one push onto `frames` plus a few number updates. It does mean nothing may keep a Rust reference into `stack` across a call, because the `Vec` might grow and move. Positions (`base + slot`) avoid that problem completely.",
       },
       {
         q: "Where do local variables go when a function returns?",
         intuition: "They're simply cut off the end of the stack. Nothing needs to clean them up, because they were never on the heap.",
         technical:
-          "`truncate(base - 1)` drops them in a single operation. This is why stack allocation is so cheap, in the JVM too: locals never need garbage collection. The exception is a local captured by a closure, which has to outlive the frame. That's the next lesson.",
+          "`truncate(base - 1)` drops them all in one operation. This is why stack variables are so cheap, in the JVM too: they never need garbage collection. The exception is a local captured by a closure, which has to outlive its frame. That's the next lesson.",
       },
       {
         q: "Why check the argument count at runtime?",
-        intuition: "Wisp doesn't know which function a variable holds until the call happens, so it can't check earlier.",
+        intuition: "Wisp doesn't know which function a variable holds until the moment of the call, so it can't check any earlier.",
         technical:
-          "The JVM checks method descriptors when it links the call, because Java's types make the target known up front. In Wisp, `f(1, 2)` could call anything. You could also choose JavaScript's lenient rule: missing arguments become `nil` and extras are dropped. Either works, as long as the frame layout stays consistent.",
+          "The JVM checks method descriptors when it links a call, because Java's types make the target known in advance. In Wisp, `f(1, 2)` could call anything. You could instead use JavaScript's relaxed rule: missing arguments become `nil` and extra ones are dropped. Either works, as long as the frame layout stays consistent.",
       },
     ],
     references: [
       ci("Calls and Functions", "calls-and-functions"),
-      { title: "JVM Specification: Frames", by: "Oracle", url: "https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-2.html#jvms-2.6", kind: "spec", note: "§2.6: local variables, operand stacks, and how invocation creates frames." },
+      { title: "JVM Specification: Frames", by: "Oracle", url: "https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-2.html#jvms-2.6", kind: "spec", note: "§2.6: local variables, operand stacks, and how a call creates a frame." },
     ],
   },
 
@@ -684,8 +847,8 @@ forever(0)`,
     summary: "Let functions capture variables from enclosing functions using upvalues, which start on the stack and move to the heap when they outlive their frame. Compared with Java lambdas.",
     tags: ["Lexical scope", "Upvalues", "Open vs closed", "Java lambdas"],
     intro: [
-      "A closure is a function plus the variables it captured from where it was written. The problem is timing. A captured local lives in its function's stack frame, but the closure might be called long after that frame is gone.",
-      "Java avoids the problem by only allowing lambdas to capture **effectively final** variables and copying their values into the lambda. Wisp allows full mutable capture, using the technique from Lua: **upvalues**. An upvalue points at the variable's stack slot while the frame is alive, and when the slot is about to disappear, the value moves to the heap. Every closure sharing that upvalue sees the move.",
+      "A closure is a function that remembers variables from the place it was written. The tricky part is timing. A captured local lives in its function's frame, but the closure might be called long after that function has returned and its frame is gone.",
+      "Java sidesteps this by only letting lambdas capture variables that never change (**effectively final**) and copying their values. Wisp allows full capture, including changes, using the technique from Lua: **upvalues**. An upvalue is a small box that points at the variable while its frame is alive. Just before the frame goes away, the value is moved into the box itself. Every closure sharing that box keeps working.",
     ],
     sim: "upvalues",
     simTitle: "Open upvalues close when the frame returns",
@@ -693,17 +856,17 @@ forever(0)`,
       title: "What Java lambdas teach us",
       points: [
         "A Java lambda that uses a local gets a **copy** of its value, stored in a field of the lambda object. That's why the local must be effectively final: a copy can't stay in sync with a changing variable.",
-        "To share mutable state, Java programmers wrap it themselves, in an `AtomicInteger` or a one-element array. An upvalue is exactly that wrapper, created automatically.",
-        "Lambdas compile to `invokedynamic`. On first use, the JVM generates a small class whose fields hold the captured values. A Wisp closure is the same idea: a function plus an array of captures.",
-        "Anonymous inner classes captured the enclosing `this` implicitly, which caused memory leaks. A closure keeps alive everything it captures, so capture only what you use.",
+        "To share changing state, Java programmers make a box themselves, such as an `AtomicInteger` or a one-element array. An upvalue is exactly that box, made automatically.",
+        "Lambdas compile to `invokedynamic`. On first use, the JVM generates a small class whose fields hold the captured values. A Wisp closure is the same idea: a function plus a list of captured things.",
+        "A closure keeps alive everything it captures. Anonymous inner classes captured the surrounding object without being asked, which caused memory leaks.",
       ],
     },
     concepts: [
       {
         heading: "Open and closed upvalues",
         body: [
-          "When a closure is created, each captured variable gets an `Upvalue` object. At first it's **open**: it stores the variable's absolute stack index, so reads and writes go straight to the live slot. Two closures that capture the same variable share the same upvalue object.",
-          "When that slot is about to be popped, because the block ends or the function returns, the VM **closes** the upvalue by copying the current value into the upvalue object itself. From then on, every closure that shares it reads and writes the heap copy. Nothing else changes, because they all go through the same upvalue.",
+          "When a closure is created, each captured variable gets an `Upvalue` box. At first the box is **open**: it holds the variable's position on the stack, so reads and writes go straight to the live variable. Two closures that capture the same variable share the same box.",
+          "When that stack slot is about to disappear, because the block ends or the function returns, the VM **closes** the box by copying the current value into it. From then on, every closure that shares the box reads and writes the copy inside it. They don't notice the difference, because they always go through the box.",
         ],
         code: {
           lang: "text",
@@ -714,19 +877,20 @@ next() calls later:        count = count + 1  -> Upvalue::Closed(1)`,
         },
       },
       {
-        heading: "Resolving a captured name at compile time",
+        heading: "Finding captured names at compile time",
         body: [
-          "When the compiler sees a name that isn't a local of the current function, it asks the enclosing function. If it's a local there, the variable is captured directly and that local is marked as captured. If it isn't, the compiler asks the next function out, recursively, and each level in between gets an upvalue that forwards it. At runtime every closure has a flat array of upvalues and never searches by name.",
+          "When the compiler meets a name that isn't a local of the current function, it asks the function around it. If the name is a local there, it's captured directly, and that local is marked as captured. If not, the compiler asks the next function out, and so on, and every function in between passes the capture along. At runtime, each closure has a simple numbered list of upvalues and never looks anything up by name.",
         ],
       },
     ],
     build: {
-      intro: "Three new heap types (`Closure`, `Upvalue`, and a capture list on `Function`), four instructions, and a small recursive search in the compiler.",
-      milestone: "functions that capture and mutate outer variables: counters, callbacks, and anonymous `fn` expressions.",
+      intro: "Three new heap types, four new instructions, and a small recursive search in the compiler.",
+      milestone: "functions that capture and change outer variables: counters, callbacks, and anonymous `fn` expressions.",
       steps: [
         {
-          title: "Closure and Upvalue objects",
-          body: "At runtime a closure is its function plus one upvalue reference per captured variable. The function records, for each capture, where to get it from.",
+          section: "Part 1 · New heap objects",
+          title: "Closure and Upvalue",
+          body: "**What they're for:** a `Closure` is what you actually call at runtime: a function plus the boxes it captured. An `Upvalue` is one box: either still pointing at a stack slot (`Open`) or holding the value itself (`Closed`). `Function` gains a capture list, telling the VM what to capture when a closure is created.",
           code: {
             lang: "rust",
             caption: "src/object.rs (changes)",
@@ -734,64 +898,92 @@ next() calls later:        count = count + 1  -> Upvalue::Closed(1)`,
     pub name: String,
     pub arity: u8,
     pub chunk: Chunk,
-    /// One entry per captured variable: (is_local, index).
-    /// is_local = true:  capture the enclosing frame's local slot \`index\`
-    /// is_local = false: reuse the enclosing closure's upvalue number \`index\`
+    /// What to capture, one entry per captured variable: (is_local, index).
+    ///   is_local = true:  the enclosing function's local slot \`index\`
+    ///   is_local = false: the enclosing closure's upvalue number \`index\`
     pub upvalues: Vec<(bool, u16)>,
 }
 
-/// A function value at runtime: the code plus what it captured.
+/// A function value at runtime: the code plus its captured boxes.
 pub struct Closure {
     pub func: Rc<Function>,
-    pub upvalues: Vec<ObjRef>, // each points to an Obj::Upvalue
+    pub upvalues: Vec<ObjRef>, // each one points to an Obj::Upvalue
 }
 
 #[derive(Clone, Copy)]
 pub enum Upvalue {
-    Open(usize),   // the variable is still on the stack, at this absolute index
-    Closed(Value), // the frame is gone: the value now lives here
+    Open(usize),   // the variable is still on the stack, at this position
+    Closed(Value), // its frame is gone: the value now lives in here
 }
 
-pub enum Obj {
-    Str(String),
-    Table(HashMap<ObjRef, Value>),
-    Function(Rc<Function>),
-    Closure(Closure),
-    Upvalue(Upvalue),
-}`,
+// two new variants in enum Obj:
+Closure(Closure),
+Upvalue(Upvalue),`,
           },
           explain: [
-            "`Function` is still the compiled, shareable code. `Closure` is the runtime value you call. One function can have many closures: each call to `make_counter` creates a new closure with its own `count`.",
-            "Upvalues are separate heap objects, not fields inside the closure, so that several closures can share one. That sharing is what makes two closures over the same variable see each other's writes.",
+            "One `Function` can have many `Closure`s. Each call to `make_counter` creates a new closure from the same compiled function, each with its own `count` box.",
+            "Boxes are separate heap objects rather than fields inside the closure. That's what lets two closures share one box, and so see each other's changes.",
           ],
         },
         {
-          title: "Find captured variables in the compiler",
-          body: "Each `FnState` gets a list of the upvalues it needs, and each `Local` gets a `captured` flag. Variable access now checks three places in order: a local, then an upvalue, then a global.",
+          section: "Part 2 · The compiler",
+          title: "New bookkeeping: captured locals and capture lists",
+          body: "**What it's for:** two small additions. Each `Local` remembers whether some closure captured it, so it can be moved to the heap when its scope ends. Each `FnState` keeps the capture list that will become `Function::upvalues`.",
           code: {
             lang: "rust",
             caption: "src/compiler.rs (changes)",
-            code: `struct Local { name: String, depth: usize, captured: bool }
-// FnState gains:  upvalues: Vec<(bool, u16)>
+            code: `struct Local {
+    name: String,
+    depth: usize,
+    captured: bool, // did a closure capture this variable?
+}
 
-impl Compiler<'_> {
-    /// Is \`name\` a variable of an enclosing function? Search outward from fns[level].
+struct FnState {
+    chunk: Chunk,
+    locals: Vec<Local>,
+    scope_depth: usize,
+    upvalues: Vec<(bool, u16)>, // what this function captures
+}
+// set captured: false and upvalues: Vec::new() wherever these are created`,
+          },
+        },
+        {
+          title: "resolve_upvalue(): find a variable in an enclosing function",
+          body: "**What it's for:** answering \"is this name a variable of a function around me?\". It checks the directly enclosing function's locals first. If the name isn't there, it asks that function to capture the name from further out, and then captures it from that function.",
+          code: {
+            lang: "rust",
+            caption: "src/compiler.rs (continued)",
+            code: `impl Compiler<'_> {
+    /// \`level\` is an index into self.fns: the function that wants the variable.
     fn resolve_upvalue(&mut self, level: usize, name: &str) -> Option<u16> {
         if level == 0 {
-            return None; // the script has no enclosing function, so it must be a global
+            return None; // the script has nothing around it, so the name is a global
         }
         let parent = level - 1;
-        // Case 1: a local of the directly enclosing function. Capture its slot.
+        // Case 1: a local of the function directly around us. Capture its slot.
         if let Some(slot) = self.fns[parent].resolve_local(name) {
             self.fns[parent].locals[slot as usize].captured = true;
             return Some(self.add_upvalue(level, true, slot));
         }
-        // Case 2: further out. Make the parent capture it first, then capture
-        // the parent's upvalue. This recursion threads it through every level.
+        // Case 2: further out. Get our parent to capture it, then capture from the parent.
         let index = self.resolve_upvalue(parent, name)?;
         Some(self.add_upvalue(level, false, index))
     }
-
+}`,
+          },
+          explain: [
+            "Take `fn outer() { let x = 1  fn mid() { fn inner() { print x } } }`. Compiling `inner`: `x` isn't local, so ask `mid`. It isn't local in `mid` either, so `mid` asks `outer`, where it's local slot 0.",
+            "So `mid` records `(true, 0)`, meaning \"capture outer's slot 0\", and `inner` records `(false, 0)`, meaning \"capture mid's upvalue 0\". The recursion threads the variable through every level in between.",
+            "The `?` in case 2 means: if no enclosing function has the name, give up and return `None`, so it's treated as a global.",
+          ],
+        },
+        {
+          title: "add_upvalue(): add to a capture list (without duplicates)",
+          body: "**What it's for:** adding an entry to a function's capture list and returning its number. If the same variable is already captured, the existing number is reused, so a function that mentions `count` five times still has one box for it.",
+          code: {
+            lang: "rust",
+            caption: "src/compiler.rs (continued)",
+            code: `impl Compiler<'_> {
     fn add_upvalue(&mut self, level: usize, is_local: bool, index: u16) -> u16 {
         let ups = &mut self.fns[level].upvalues;
         if let Some(i) = ups.iter().position(|u| *u == (is_local, index)) {
@@ -800,172 +992,241 @@ impl Compiler<'_> {
         ups.push((is_local, index));
         (ups.len() - 1) as u16
     }
-
-    /// Emit the right "get" for a name: local, then upvalue, then global.
+}`,
+          },
+        },
+        {
+          title: "get_var(): local, then upvalue, then global",
+          body: "**What it's for:** emitting the right instruction to read a name. It checks the three places a variable can live, in order. `Expr::Var` now just calls `get_var`. A matching `set_var` does the same for assignment.",
+          code: {
+            lang: "rust",
+            caption: "src/compiler.rs (continued)",
+            code: `impl Compiler<'_> {
     fn get_var(&mut self, name: &str) {
-        let level = self.fns.len() - 1;
+        let level = self.fns.len() - 1; // the innermost function
         if let Some(slot) = self.fns[level].resolve_local(name) {
-            self.emit(Op::GetLocal(slot));
+            self.emit(Op::GetLocal(slot));          // 1. our own local
         } else if let Some(i) = self.resolve_upvalue(level, name) {
-            self.emit(Op::GetUpvalue(i));
+            self.emit(Op::GetUpvalue(i));           // 2. captured from outside
         } else {
             let k = self.cur().chunk.add_name(name);
-            self.emit(Op::GetGlobal(k));
+            self.emit(Op::GetGlobal(k));            // 3. a global
         }
     }
     // set_var() is identical, with SetLocal / SetUpvalue / SetGlobal.
-    // Expr::Var calls get_var(name); Expr::Assign calls set_var(name).
+    // Expr::Var calls self.get_var(name). Expr::Assign compiles the value, then calls self.set_var(name).
 }`,
           },
-          explain: [
-            "Take `fn outer() { let x = 1  fn mid() { fn inner() { print x } } }`. While compiling `inner`, `x` isn't local, so the compiler asks `mid`. It isn't local there either, so it asks `outer`, where it is: slot 0. So `mid` gets upvalue `(true, 0)`, and `inner` gets `(false, 0)`, meaning \"my parent's upvalue 0\".",
-            "Marking the local as `captured` tells the compiler that when this local's scope ends, it must emit `CloseUpvalue` instead of `Pop`.",
-            "Globals are never captured. They live in the globals table for the whole run, so any function can reach them by name.",
-          ],
+          explain: ["Globals are never captured: they live in the globals table for the whole program, so any function can reach them by name."],
         },
         {
-          title: "Emit closures and close captured locals",
-          body: "Function values are now created by `Closure(k)` instead of `Const(k)`, and scope exits close captured slots.",
+          title: "Create closures, and close captured locals",
+          body: "**What it's for:** three small changes. Function values are now created with `Closure(k)` instead of `Const(k)`, anonymous `fn` expressions are compiled, and when a block ends, captured locals get `CloseUpvalue` instead of `Pop`. Four new instructions support this.",
           code: {
             lang: "rust",
             caption: "src/compiler.rs (changes)",
-            code: `// in finish(): keep the upvalue list on the Function
+            code: `// finish(): keep the capture list on the Function
 let f = Function { name: name.to_string(), arity, chunk: state.chunk, upvalues: state.upvalues };
 
-// in Stmt::Fn: replace Op::Const(k) with
+// Stmt::Fn: replace Op::Const(k) with
 self.emit(Op::Closure(k));
 
-// anonymous functions: fn(x) { ... } used as an expression
+// a new arm in expr(): anonymous functions, fn(x) { ... }
 Expr::Lambda(params, body) => {
     let f = self.function("anonymous", params, body)?;
     let k = self.cur().chunk.add_const(Value::Obj(f));
     self.emit(Op::Closure(k));
 }
 
-// in block(): on scope exit, captured locals are closed instead of just popped
+// block(): the loop that pops locals at the end of a scope becomes
 loop {
     let state = self.cur();
     let Some(local) = state.locals.last() else { break };
-    if local.depth <= state.scope_depth { break; }
+    if local.depth <= state.scope_depth {
+        break; // belongs to an outer scope: keep it
+    }
     let captured = local.captured;
     state.locals.pop();
     self.emit(if captured { Op::CloseUpvalue } else { Op::Pop });
 }
 
-// four new instructions in chunk.rs
-Closure(u16),      // operand = function constant: build a closure and push it
-GetUpvalue(u16),   // push the value of the current closure's upvalue i
-SetUpvalue(u16),   // write it (the value stays on the stack, like SetLocal)
-CloseUpvalue,      // move the top slot to the heap, then pop it`,
+// four new variants in Op:
+//   Closure(u16)     operand = function constant: build a closure and push it
+//   GetUpvalue(u16)  push the value in the current closure's box i
+//   SetUpvalue(u16)  change it (the value stays on the stack, like SetLocal)
+//   CloseUpvalue     move the top stack slot into its box, then pop it`,
           },
           explain: [
-            "Function returns don't need a `CloseUpvalue` for each local. The VM closes everything above the frame's `base` in one go when it executes `Return`.",
+            "The block loop is written out longhand so that `state` (a borrow of `self`) is finished before `self.emit` is called. Rust doesn't allow both at once.",
+            "A function's return doesn't need a `CloseUpvalue` for each local. The VM closes everything in the frame in one go when `Return` runs.",
           ],
         },
         {
-          title: "Run closures in the VM",
-          body: "Frames now run closures. The VM keeps a list of open upvalues, so capturing the same slot twice returns the same upvalue, and closing finds them quickly.",
+          section: "Part 3 · The VM",
+          title: "Frames run closures",
+          body: "**What it's for:** a frame now remembers its `Closure`, not just the function, because instructions need it to find their upvalues. Three helpers convert between functions and closures. The script itself is wrapped in a closure that captures nothing.",
           code: {
             lang: "rust",
             caption: "src/vm.rs (changes)",
             code: `struct CallFrame {
-    closure: ObjRef,    // the Closure being run (needed to find its upvalues)
-    func: Rc<Function>, // closure.func, cached
+    closure: ObjRef,    // the running Closure, needed to reach its upvalues
+    func: Rc<Function>, // the closure's function, kept handy
     ip: usize,
     base: usize,
 }
-// Vm gains:  open_upvalues: Vec<ObjRef>
-// run() keeps \`closure\` as a 4th hot local next to func, ip and base.
-// Call now expects Obj::Closure(c) and uses c.func; Return restores closure too.
+// Vm gains:  open_upvalues: Vec<ObjRef>,  // boxes still pointing at the stack
 
-Op::Closure(k) => {
-    let Value::Obj(r) = func.chunk.consts[k as usize] else { unreachable!() };
-    let Obj::Function(f) = self.heap.get(r) else { unreachable!() };
-    let f = f.clone();
-    let mut upvalues = Vec::with_capacity(f.upvalues.len());
-    for &(is_local, index) in &f.upvalues {
-        upvalues.push(if is_local {
-            self.capture(base + index as usize)       // a local of the frame running right now
-        } else {
-            self.upvalue_of(closure, index)           // something our own closure already captured
+impl Vm {
+    /// The Rc<Function> inside a Function object.
+    fn function(&self, r: ObjRef) -> Rc<Function> {
+        let Obj::Function(f) = self.heap.get(r) else { unreachable!() };
+        f.clone()
+    }
+
+    /// Wrap a compiled function in a closure that captures nothing (used for the script).
+    pub fn new_closure(&mut self, func: ObjRef) -> ObjRef {
+        let func = self.function(func);
+        self.heap.alloc(Obj::Closure(Closure { func, upvalues: Vec::new() }))
+    }
+
+    /// The function inside a closure.
+    fn func_of(&self, closure: ObjRef) -> Rc<Function> {
+        let Obj::Closure(c) = self.heap.get(closure) else { unreachable!() };
+        c.func.clone()
+    }
+}
+
+// in run(): start from a closure, and keep \`closure\` as a 4th local next to func, ip, base
+//     let mut closure = self.new_closure(script);
+//     let mut func = self.func_of(closure);
+// in Call: accept Obj::Closure(c) and use c.func; store \`closure = r\` in the new frame
+// in Return: also restore \`closure = caller.closure\``,
+          },
+        },
+        {
+          title: "upvalue_of() and capture(): find or create a box",
+          body: "**What they're for:** `upvalue_of` returns box number `i` of a closure. `capture` gets the box for a stack slot. If an open box for that slot already exists, it's reused, which is how two closures end up sharing one variable.",
+          code: {
+            lang: "rust",
+            caption: "src/vm.rs (continued)",
+            code: `impl Vm {
+    fn upvalue_of(&self, closure: ObjRef, i: u16) -> ObjRef {
+        let Obj::Closure(c) = self.heap.get(closure) else { unreachable!() };
+        c.upvalues[i as usize]
+    }
+
+    fn capture(&mut self, slot: usize) -> ObjRef {
+        // is there already an open box for this slot? share it
+        for &r in &self.open_upvalues {
+            if let Obj::Upvalue(Upvalue::Open(s)) = self.heap.get(r) {
+                if *s == slot {
+                    return r;
+                }
+            }
+        }
+        // no: make a new box pointing at the slot, and remember it's open
+        let r = self.heap.alloc(Obj::Upvalue(Upvalue::Open(slot)));
+        self.open_upvalues.push(r);
+        r
+    }
+}`,
+          },
+        },
+        {
+          title: "close_upvalues(): move values off the stack",
+          body: "**What it's for:** just before stack slots disappear, every open box pointing at one of them copies the current value inside itself and becomes `Closed`. Closed boxes are then removed from the open list.",
+          code: {
+            lang: "rust",
+            caption: "src/vm.rs (continued)",
+            code: `impl Vm {
+    /// Close every open box that points at stack position \`from\` or above.
+    fn close_upvalues(&mut self, from: usize) {
+        let stack = &self.stack;
+        let heap = &mut self.heap;
+        self.open_upvalues.retain(|&r| {
+            let Obj::Upvalue(up) = heap.get_mut(r) else { unreachable!() };
+            match *up {
+                Upvalue::Open(slot) if slot >= from => {
+                    *up = Upvalue::Closed(stack[slot]); // the value moves into the box
+                    false                               // and it's no longer open
+                }
+                _ => true, // still open: keep it in the list
+            }
         });
     }
-    let c = self.heap.alloc(Obj::Closure(Closure { func: f, upvalues }));
-    self.push(Value::Obj(c));
-}
-
-Op::GetUpvalue(i) => {
-    let up = self.upvalue_of(closure, i);
-    let v = match self.heap.get(up) {
-        Obj::Upvalue(Upvalue::Open(slot)) => self.stack[*slot], // still on the stack
-        Obj::Upvalue(Upvalue::Closed(v)) => *v,                 // moved to the heap
-        _ => unreachable!(),
-    };
-    self.push(v);
-}
-Op::SetUpvalue(i) => {
-    let up = self.upvalue_of(closure, i);
-    let v = self.peek(0);
-    match self.heap.get_mut(up) {
-        Obj::Upvalue(Upvalue::Open(slot)) => { let s = *slot; self.stack[s] = v; }
-        Obj::Upvalue(Upvalue::Closed(c)) => *c = v,
-        _ => unreachable!(),
-    }
-}
-Op::CloseUpvalue => {
-    self.close_upvalues(self.stack.len() - 1); // just the top slot
-    self.pop();
-}
-// and in Op::Return, before truncating the stack:
-//     self.close_upvalues(base);
-
-// ── helpers ──
-fn upvalue_of(&self, closure: ObjRef, i: u16) -> ObjRef {
-    let Obj::Closure(c) = self.heap.get(closure) else { unreachable!() };
-    c.upvalues[i as usize]
-}
-
-/// Capture a stack slot, reusing an open upvalue for it if one exists.
-fn capture(&mut self, slot: usize) -> ObjRef {
-    for &r in &self.open_upvalues {
-        if let Obj::Upvalue(Upvalue::Open(s)) = self.heap.get(r) {
-            if *s == slot {
-                return r; // shared: both closures will see each other's writes
-            }
-        }
-    }
-    let r = self.heap.alloc(Obj::Upvalue(Upvalue::Open(slot)));
-    self.open_upvalues.push(r);
-    r
-}
-
-/// Close every open upvalue pointing at \`from\` or above: copy the value off the stack.
-fn close_upvalues(&mut self, from: usize) {
-    let stack = &self.stack;
-    let heap = &mut self.heap;
-    self.open_upvalues.retain(|&r| {
-        let Obj::Upvalue(up) = heap.get_mut(r) else { unreachable!() };
-        match *up {
-            Upvalue::Open(slot) if slot >= from => {
-                *up = Upvalue::Closed(stack[slot]); // the value moves to the heap
-                false                               // and it's no longer open
-            }
-            _ => true,
-        }
-    });
 }`,
           },
           explain: [
-            "`is_local` captures use `base + index`, meaning the slot in the frame that is **creating** the closure, which is the enclosing function of the closure being built. That's why the compiler recorded the *parent's* slot number.",
-            "`close_upvalues` borrows `stack` and `heap` as separate fields, so it can read one and write the other inside `retain`. Borrowing `self` as a whole would be rejected.",
-            "Reads and writes check `Open` or `Closed` every time. A closure doesn't need to know whether its variable's frame is still alive, because the upvalue handles both cases.",
-            "The top-level script now runs as a closure too: wrap the script function in `Closure { func, upvalues: vec![] }` before pushing the first frame.",
+            "`retain` walks the list and keeps only the entries for which the closure returns `true`.",
+            "`stack` and `heap` are borrowed as separate fields up front, so the closure can read one while changing the other. Borrowing all of `self` there would be rejected by Rust.",
           ],
-          jvm: "The JVM never needs this, because captured values are immutable copies, so there's nothing to keep in sync. The cost of Java's simpler model is the language restriction: no `count++` inside a lambda. Kotlin lifts that restriction by quietly boxing captured `var`s in a `Ref` object, which is a closed upvalue from day one.",
         },
         {
-          title: "Try it",
-          body: "Each call to `make_counter` creates a new `count`, and two closures created by the same call share one.",
+          title: "Arm: Closure (create a closure)",
+          body: "**What it does:** takes the compiled function from the constant pool, walks its capture list, and collects a box for each entry. A captured local of the current frame gets a box via `capture`, and anything already captured by the current closure is passed along. Then it pushes the new closure.",
+          code: {
+            lang: "rust",
+            caption: "src/vm.rs · inside run's match",
+            code: `                Op::Closure(k) => {
+                    let Value::Obj(r) = func.chunk.consts[k as usize] else { unreachable!() };
+                    let f = self.function(r);
+                    let mut upvalues = Vec::with_capacity(f.upvalues.len());
+                    for &(is_local, index) in &f.upvalues {
+                        upvalues.push(if is_local {
+                            self.capture(base + index as usize) // a local of the frame running now
+                        } else {
+                            self.upvalue_of(closure, index)     // something our closure already captured
+                        });
+                    }
+                    let c = self.heap.alloc(Obj::Closure(Closure { func: f, upvalues }));
+                    self.push(Value::Obj(c));
+                }`,
+          },
+          explain: [
+            "`base + index` is a slot in the frame that is **creating** the closure, which is the function around it. That's why the compiler recorded the *parent's* slot numbers.",
+          ],
+        },
+        {
+          title: "Arms: read, write and close upvalues",
+          body: "**What they do:** `GetUpvalue` and `SetUpvalue` go through the box: if it's open they use the stack slot, if it's closed they use the value inside. `CloseUpvalue` closes the top slot's box and pops it. `Return` also closes everything in the finishing frame.",
+          code: {
+            lang: "rust",
+            caption: "src/vm.rs · inside run's match",
+            code: `                Op::GetUpvalue(i) => {
+                    let up = self.upvalue_of(closure, i);
+                    let v = match self.heap.get(up) {
+                        Obj::Upvalue(Upvalue::Open(slot)) => self.stack[*slot], // still on the stack
+                        Obj::Upvalue(Upvalue::Closed(v)) => *v,                 // moved into the box
+                        _ => unreachable!(),
+                    };
+                    self.push(v);
+                }
+                Op::SetUpvalue(i) => {
+                    let up = self.upvalue_of(closure, i);
+                    let v = self.peek(0);
+                    match self.heap.get_mut(up) {
+                        Obj::Upvalue(Upvalue::Open(slot)) => {
+                            let s = *slot;
+                            self.stack[s] = v;
+                        }
+                        Obj::Upvalue(Upvalue::Closed(c)) => *c = v,
+                        _ => unreachable!(),
+                    }
+                }
+                Op::CloseUpvalue => {
+                    self.close_upvalues(self.stack.len() - 1); // just the top slot
+                    self.pop();
+                }
+                // and in Op::Return, before truncating the stack:
+                //     self.close_upvalues(base);`,
+          },
+          explain: ["A closure never needs to know whether the frame its variable came from is still alive. The box handles both cases, every time."],
+          jvm: "The JVM never needs this, because captured values are unchangeable copies. The price is the language rule: no `count++` inside a lambda. Kotlin lifts that rule by quietly putting captured `var`s in a `Ref` box, which is a closed upvalue from the start.",
+        },
+        {
+          section: "Part 4 · Try it",
+          title: "Counters and shared boxes",
+          body: "Each call to `make_counter` creates a new `count`. Two closures created by the same call share one.",
           code: {
             lang: "wisp",
             caption: "closures.wisp",
@@ -997,8 +1258,8 @@ print pair()()`,
 1
 20`,
           explain: [
-            "`a` and `b` have separate counters because each `make_counter` call had its own `count` slot, so each one got its own upvalue.",
-            "In `pair`, `inc` and `get` captured the same slot while `pair` was still running, so `capture` returned the same upvalue to both. When `pair` returned, it closed with the value `20`, and `get` still reads it.",
+            "`a` and `b` have separate counters: each `make_counter` call had its own `count` slot, so each closure got its own box.",
+            "In `pair`, `inc` and `get` captured the same slot while `pair` was still running, so `capture` returned the same box to both. When `pair` returned, the box closed holding `20`, and `get` still reads it.",
           ],
         },
       ],
@@ -1006,21 +1267,21 @@ print pair()()`,
     questions: [
       {
         q: "Why not just copy captured values, like Java does?",
-        intuition: "Because then `count = count + 1` inside the closure would change the closure's copy, not the variable the rest of the function sees. Counters and callbacks that update shared state wouldn't work.",
+        intuition: "Because then `count = count + 1` inside the closure would change the closure's copy, not the variable the rest of the program sees. Counters and callbacks that update shared state wouldn't work.",
         technical:
-          "Copying is correct only for variables that never change after capture, which is exactly Java's effectively-final rule. Upvalues give you shared mutable capture for the price of one indirection per access. A nice optimization: if the compiler can see a captured variable is never assigned after capture, it could copy it instead.",
+          "Copying is only correct for variables that never change after capture, which is exactly Java's effectively-final rule. Upvalues give you shared, changeable capture for one extra step per access. As an optimization, if the compiler can see a captured variable is never assigned again, it could copy it instead.",
       },
       {
         q: "Why not put every local variable on the heap? It would be simpler.",
         intuition: "Most locals are never captured, and stack slots are much cheaper. You'd pay the heap cost on every variable just to support the few that need it.",
         technical:
-          "Heap-allocating every local means an allocation per variable per call, plus garbage-collector work later. Upvalues pay only for captured variables, and only after their frame ends. JVM JITs go further with **escape analysis**: they prove an object never leaves its method and keep it in registers.",
+          "Putting every local on the heap means an allocation per variable per call, plus garbage-collection work later. Upvalues only cost anything for captured variables, and only after their frame ends. JVM JITs go further with **escape analysis**: they prove an object never leaves its method and keep it in registers.",
       },
       {
         q: "How would I see the upvalues the compiler created?",
         intuition: "Teach the disassembler to print a function's capture list next to each `Closure` instruction.",
         technical:
-          "For `Op::Closure(k)`, look up the function constant and print each `(is_local, index)` pair as `local 2` or `upvalue 0`. It's the most useful debugging aid for closure bugs, and it's what `javap -p` does for the synthetic fields of a lambda class.",
+          "For `Op::Closure(k)`, look up the function constant and print each `(is_local, index)` pair as `local 2` or `upvalue 0`. It's the most useful debugging aid for closure bugs, and much like `javap -p` showing a lambda class's hidden fields.",
       },
     ],
     references: [
@@ -1039,43 +1300,44 @@ print pair()()`,
     summary: "Free unreachable heap objects with a mark-and-sweep collector: roots, tracing, sweeping and a growing threshold, the same core idea behind every JVM collector.",
     tags: ["Roots", "Mark & sweep", "Tri-color", "Heap growth"],
     intro: [
-      "Right now the heap only grows. Every string join and every table stays forever, even when no variable refers to it anymore. A garbage collector finds the objects the program can no longer reach and frees them.",
-      "Every JVM collector, from Serial to G1 to ZGC, is built on the same core idea: start from the **roots** (the values the program can touch directly), follow every reference, and anything you never reached is garbage. You'll build the simplest correct version: stop the program, mark, sweep, continue.",
+      "Right now the heap only grows. Every joined string and every table stays forever, even when no variable refers to it any more. A garbage collector finds the objects the program can no longer reach and frees them.",
+      "Every JVM collector, from Serial to G1 to ZGC, is built on the same core idea: start from the **roots** (the values the program can touch directly), follow every reference you find, and anything you never reached is garbage. You'll build the simplest correct version: pause the program, mark what's reachable, sweep away the rest, and carry on.",
     ],
     sim: "gc",
     simTitle: "Mark from the roots, sweep the rest",
     jvm: {
       title: "What the JVM collectors teach us",
       points: [
-        "GC **roots** are thread stacks (locals and operand stacks), static fields, JNI handles and a few VM internals. Anything not reachable from them is garbage, including cycles. That's why reference counting isn't enough.",
+        "GC **roots** are thread stacks (locals and operand stacks), static fields, JNI handles and a few VM internals. Anything not reachable from them is garbage, including groups of objects that point at each other. That's why counting references isn't enough.",
         "The **generational hypothesis** says most objects die young. The JVM splits the heap into a young generation (collected often and cheaply) and an old generation (collected rarely).",
-        "Collectors need the program paused at a known point to read roots safely, a **safepoint**. Our VM collects only at allocation points, which is a simple way to get the same guarantee.",
-        "Heap sizing is a trade-off between memory and time: `-Xmx`, plus how full the heap gets before collecting. We'll grow the threshold with the live data, the simplest adaptive policy.",
+        "The collector needs the program paused at a known point to read the roots safely: a **safepoint**. Our VM only collects at the start of instructions that allocate, which gives the same guarantee very simply.",
+        "Heap sizing trades memory for time: `-Xmx`, and how full the heap gets before collecting. We'll grow the threshold with the amount of live data, the simplest adaptive policy.",
       ],
     },
     concepts: [
       {
         heading: "Mark and sweep in two sentences",
         body: [
-          "**Mark**: put every root on a to-do list (the *gray* set). Repeatedly take an object off the list, mark it (*black*), and add everything it references that isn't marked yet. **Sweep**: walk the whole heap. Anything still unmarked (*white*) is unreachable, so free it. Then clear the marks for next time.",
-          "Using an explicit to-do list instead of recursion matters: a long linked list would otherwise overflow the Rust stack while marking.",
+          "**Mark**: put every root on a to-do list (the *gray* set). Repeatedly take one object off the list, mark it (*black*), and add everything it points to that isn't marked yet. **Sweep**: walk the whole heap. Anything still unmarked (*white*) can't be reached, so free it. Then clear the marks for next time.",
+          "Using a to-do list rather than recursion matters: following a long chain of objects recursively would overflow Rust's own call stack.",
         ],
       },
       {
         heading: "When is it safe to collect?",
         body: [
-          "Only when every live reference is somewhere the collector can see: on the VM stack, in globals, in frames, or in other objects. A reference held only in a Rust local variable is invisible to the GC, so if a collection happens at that moment, the object gets freed while still in use.",
-          "The simple rule that avoids this: **collect only at the start of instructions that allocate, before popping their operands.** At that moment every live value is on the stack or reachable from it.",
+          "Only when every live reference is somewhere the collector can see: on the VM stack, in globals, in frames, or inside other objects. A reference held only in a Rust local variable is invisible to the collector. If a collection happens at that moment, the object gets freed while it's still being used.",
+          "The simple rule that avoids this: **collect only at the start of an instruction that allocates, before it pops its inputs.** At that moment every live value is on the stack or reachable from it.",
         ],
       },
     ],
     build: {
-      intro: "The heap gains mark bits, a free list and a threshold. The VM gains `collect()`, which gathers roots and asks the heap to mark and sweep.",
-      milestone: "long-running loops that allocate run in constant memory, and `--gc-log` shows each collection.",
+      intro: "The heap gains marks, a free list and a threshold. The VM gains `collect`, which gathers the roots and asks the heap to mark and sweep.",
+      milestone: "long-running loops that create objects run in constant memory, and `--gc-log` shows each collection.",
       steps: [
         {
-          title: "Mark bits, a free list and a threshold",
-          body: "Freed slots go on a free list, so `alloc` can reuse them. `live` counts objects, and `next_gc` says when to collect next.",
+          section: "Part 1 · Heap bookkeeping",
+          title: "Marks, a free list and a threshold",
+          body: "**What it's for:** the heap needs three new things. `marks` records which objects were reached. `free` lists slots that were freed and can be reused. `live` and `next_gc` decide when it's time to collect.",
           code: {
             lang: "rust",
             caption: "src/object.rs (Heap changes)",
@@ -1084,9 +1346,9 @@ pub struct Heap {
     objects: Vec<Option<Obj>>,
     strings: HashMap<String, ObjRef>,
     marks: Vec<bool>,   // marks[i]: was objects[i] reached in this collection?
-    free: Vec<u32>,     // indexes of freed slots, ready to reuse
+    free: Vec<u32>,     // positions of freed slots, ready to reuse
     pub live: usize,    // how many objects exist right now
-    pub next_gc: usize, // collect when live reaches this
+    pub next_gc: usize, // collect when \`live\` reaches this
 }
 
 impl Heap {
@@ -1097,7 +1359,20 @@ impl Heap {
     pub fn should_collect(&self) -> bool {
         self.live >= self.next_gc
     }
-
+}`,
+          },
+          explain: [
+            "`..Default::default()` means \"every other field gets its default\" (empty lists, zero).",
+            "Use `Heap::new()` in `Vm::new` so the first collection waits until there are 1024 objects.",
+          ],
+        },
+        {
+          title: "alloc() reuses freed slots",
+          body: "**What it's for:** when a slot has been freed, the next new object goes there instead of growing the list. This keeps references small and the list from growing forever.",
+          code: {
+            lang: "rust",
+            caption: "src/object.rs (Heap changes)",
+            code: `impl Heap {
     pub fn alloc(&mut self, obj: Obj) -> ObjRef {
         self.live += 1;
         if let Some(i) = self.free.pop() {
@@ -1105,19 +1380,17 @@ impl Heap {
             return ObjRef(i);
         }
         self.objects.push(Some(obj));
-        self.marks.push(false);
+        self.marks.push(false); // keep marks the same length as objects
         ObjRef(self.objects.len() as u32 - 1)
     }
 }`,
           },
-          explain: [
-            "Reusing slots keeps `ObjRef`s small and the `Vec` from growing without limit. A freed index is only ever reused for a new object, and nothing reachable still points at the old one, which is exactly what the collector just proved.",
-            "Use `Heap::new()` instead of `Heap::default()` in `Vm::new`, so the first collection waits for 1024 objects.",
-          ],
+          explain: ["Reusing a slot is safe because the collector only frees an object when it has proven that nothing reachable still points at it."],
         },
         {
-          title: "Mark: follow every reference",
-          body: "`mark` takes the roots as its starting to-do list. For each object it marks, it adds the object's children. This is the only place that needs to know what each kind of object contains.",
+          section: "Part 2 · Mark",
+          title: "mark(): follow every reference",
+          body: "**What it's for:** starting from the roots, find every object the program can still reach and mark it. For each object, it adds whatever that object points to onto the to-do list. This is the only place that needs to know what each kind of object contains.",
           code: {
             lang: "rust",
             caption: "src/object.rs (continued)",
@@ -1126,12 +1399,12 @@ impl Heap {
         while let Some(r) = gray.pop() {
             let i = r.0 as usize;
             if self.marks[i] {
-                continue; // already done: this is what stops cycles looping forever
+                continue; // already done (this is what stops cycles looping forever)
             }
             self.marks[i] = true;
-            // add everything this object references
+            // add everything this object points to
             match self.objects[i].as_ref().unwrap() {
-                Obj::Str(_) => {} // strings reference nothing
+                Obj::Str(_) => {} // strings point at nothing
                 Obj::Table(fields) => {
                     for (key, value) in fields {
                         gray.push(*key);
@@ -1141,36 +1414,45 @@ impl Heap {
                 Obj::Function(f) => push_consts(&mut gray, &f.chunk),
                 Obj::Closure(c) => {
                     push_consts(&mut gray, &c.func.chunk); // its code's constants
-                    gray.extend(&c.upvalues);              // and what it captured
+                    gray.extend(&c.upvalues);              // and its captured boxes
                 }
                 Obj::Upvalue(Upvalue::Closed(v)) => push_value(&mut gray, *v),
                 Obj::Upvalue(Upvalue::Open(_)) => {} // its value is on the stack, already a root
             }
         }
     }
-}
-
-fn push_value(gray: &mut Vec<ObjRef>, v: Value) {
+}`,
+          },
+          explain: [
+            "`gray` is the to-do list. It starts with the roots and shrinks and grows as objects are processed. When it's empty, everything reachable is marked.",
+            "Checking `marks[i]` first means each object is processed once, even if it's reachable many ways, and two objects pointing at each other can't loop forever.",
+            "If you add a new kind of `Obj` later, this `match` stops compiling until you say what it points to. That's a helpful reminder.",
+          ],
+        },
+        {
+          title: "push_value() and push_consts()",
+          body: "**What they're for:** two tiny helpers. `push_value` adds a value to the to-do list if it's a reference. `push_consts` does that for every constant in a chunk, because string literals, field names and nested functions all live in constant pools.",
+          code: {
+            lang: "rust",
+            caption: "src/object.rs (continued)",
+            code: `fn push_value(gray: &mut Vec<ObjRef>, v: Value) {
     if let Value::Obj(r) = v {
-        gray.push(r);
+        gray.push(r); // numbers, booleans and nil point at nothing
     }
 }
 
 fn push_consts(gray: &mut Vec<ObjRef>, chunk: &Chunk) {
     for &v in &chunk.consts {
-        push_value(gray, v); // strings, field names and nested functions
+        push_value(gray, v);
     }
 }`,
           },
-          explain: [
-            "Marked objects are \"black\", the ones on the `gray` list are \"gray\", and everything else is \"white\". When the list is empty, every reachable object is black.",
-            "A function's constant pool is a source of references. Without `push_consts`, the string `\"hello\"` from a literal would be freed while the code that uses it is still running.",
-            "If you add a new kind of `Obj` later, the `match` stops compiling until you say what it references. That's the GC equivalent of the interpreter's exhaustive `match`.",
-          ],
+          explain: ["Forgetting constants is a classic bug: the string `\"hello\"` from a literal would be freed while the code that prints it is still running."],
         },
         {
-          title: "Sweep: free what wasn't marked",
-          body: "Walk every slot. Clear the marks on survivors, and free the rest. Freed strings must also leave the intern table.",
+          section: "Part 3 · Sweep",
+          title: "sweep(): free whatever wasn't marked",
+          body: "**What it's for:** walking every slot. Marked objects survive, and their marks are cleared for next time. Unmarked objects are freed and their slots added to the free list. Freed strings are also removed from the intern table.",
           code: {
             lang: "rust",
             caption: "src/object.rs (continued)",
@@ -1178,10 +1460,11 @@ fn push_consts(gray: &mut Vec<ObjRef>, chunk: &Chunk) {
     pub fn sweep(&mut self) {
         for i in 0..self.objects.len() {
             if self.marks[i] {
-                self.marks[i] = false; // a survivor: reset it for the next collection
+                self.marks[i] = false; // a survivor: reset its mark for the next collection
                 continue;
             }
-            if let Some(obj) = self.objects[i].take() { // unreachable: free it
+            if let Some(obj) = self.objects[i].take() {
+                // unreachable: free it
                 if let Obj::Str(s) = obj {
                     self.strings.remove(&s); // don't let the intern table hand it out again
                 }
@@ -1189,28 +1472,30 @@ fn push_consts(gray: &mut Vec<ObjRef>, chunk: &Chunk) {
                 self.live -= 1;
             }
         }
-        // collect again once the heap has doubled since this collection
+        // collect again once the heap has doubled since now
         self.next_gc = (self.live * 2).max(1024);
     }
 }`,
           },
           explain: [
-            "The intern table must not keep strings alive, or no string would ever be freed. It holds **weak** references: the sweep removes dead entries instead of the table acting as a root.",
-            "Doubling the threshold means a program with lots of live data collects less often, so the total GC time stays roughly proportional to the work the program does. Without growth, a program with 1,000 live objects would collect on almost every allocation.",
+            "`take()` removes the object from its slot (leaving `None`), which also drops it and frees its memory.",
+            "The intern table must not keep strings alive, or no string would ever be freed. So it isn't a root. Instead, sweeping removes its dead entries. This kind of table is called **weak**.",
+            "Doubling the threshold means a program with lots of live data collects less often, so time spent collecting stays in proportion to the program's own work.",
           ],
-          jvm: "Java has weak references too: `WeakHashMap`, and the JVM's own string table, which drops interned strings that nothing references anymore. The idea is the same: an index or cache must not keep its contents alive.",
+          jvm: "Java has weak tables too: `WeakHashMap`, and the JVM's own string table, which drops interned strings nothing uses any more.",
         },
         {
-          title: "Roots and triggering, in the VM",
-          body: "The VM knows where the roots are, so `collect` lives on the VM. `maybe_gc` runs at the top of every instruction that allocates.",
+          section: "Part 4 · Hook it into the VM",
+          title: "collect(): gather the roots, mark, sweep",
+          body: "**What it's for:** the VM knows where the roots are, so it builds the starting to-do list: everything on the stack, every global, every running closure, and every open upvalue box. Then the heap marks and sweeps.",
           code: {
             lang: "rust",
             caption: "src/vm.rs (changes)",
             code: `impl Vm {
     fn collect(&mut self) {
         let before = self.heap.live;
+        // 1. ROOTS: what the program can reach without following a reference
         let mut roots = Vec::new();
-        // 1. ROOTS: every value the program can reach without following a reference
         for v in self.stack.iter().chain(self.globals.values()) {
             if let Value::Obj(r) = v {
                 roots.push(*r);
@@ -1220,15 +1505,28 @@ fn push_consts(gray: &mut Vec<ObjRef>, chunk: &Chunk) {
             roots.push(frame.closure); // running code, and through it its constants
         }
         roots.extend(&self.open_upvalues);
-        // 2. MARK everything reachable  3. SWEEP the rest
+        // 2. MARK everything reachable, 3. SWEEP the rest
         self.heap.mark(roots);
         self.heap.sweep();
         if self.gc_log {
             eprintln!("[gc] {before} -> {} objects, next at {}", self.heap.live, self.heap.next_gc);
         }
     }
-
-    /// Call at the start of any instruction that allocates, *before* popping operands.
+}`,
+          },
+          explain: [
+            "`.chain(...)` joins two lists for one loop: the stack values, then the global values.",
+            "`gc_log` is a `bool` field on the VM, set from a `--gc-log` flag, so you can watch collections happen.",
+          ],
+          jvm: "HotSpot finds references in frames using **stack maps**: tables made by the compiler saying which slots hold references at each safepoint. Our stack holds tagged `Value`s, so the collector can just check each one's tag. Simpler, at the cost of some memory.",
+        },
+        {
+          title: "maybe_gc(): collect at safe moments",
+          body: "**What it's for:** deciding when to collect. Call it as the **first line** of every instruction that allocates (`Add`, `NewTable`, `Closure`), before the instruction pops anything. At that moment every live value is on the stack.",
+          code: {
+            lang: "rust",
+            caption: "src/vm.rs (changes)",
+            code: `impl Vm {
     fn maybe_gc(&mut self) {
         if self.stress_gc || self.heap.should_collect() {
             self.collect();
@@ -1236,19 +1534,19 @@ fn push_consts(gray: &mut Vec<ObjRef>, chunk: &Chunk) {
     }
 }
 
-// in run(): the first line of Op::Add, Op::NewTable and Op::Closure
+// the first line of Op::Add, Op::NewTable and Op::Closure:
 self.maybe_gc();`,
           },
           explain: [
-            "Why before popping? In `Add`, the two strings being joined are still on the stack, so they're roots. If the collection ran after popping them, they'd be unreachable, get freed, and then be read. That's the classic GC bug.",
-            "`stress_gc` collects on **every** allocation. Run your test scripts with it on. If a root is missing, it fails immediately on a simple test instead of rarely and mysteriously on a big one.",
-            "The compiler allocates too (interned strings, function objects), but never collects: the GC only runs from `maybe_gc` in the VM. By the time the script runs, everything the compiler made is reachable through the script's constants.",
+            "Why before popping? In `Add`, the two strings being joined are still on the stack, so they're roots. If the collection ran after popping them, they'd be unreachable, get freed, and then be read: the classic GC bug.",
+            "`stress_gc` (another `bool` field) collects on **every** allocation. Turn it on when running your test scripts: a missing root then fails immediately on a small test, instead of rarely and mysteriously on a big one.",
+            "The compiler allocates too, but never triggers a collection, because only `maybe_gc` does. By the time the script runs, everything the compiler made is reachable through the script's constants.",
           ],
-          jvm: "HotSpot finds roots in frames using **stack maps**, compiler-generated tables saying which slots hold references at each safepoint. Our stack holds tagged `Value`s, so the GC can just check each tag. That's simpler but uses more memory per slot.",
         },
         {
-          title: "Watch it work",
-          body: "This loop creates 100,000 tables but never keeps more than one, so memory stays flat.",
+          section: "Part 5 · Watch it work",
+          title: "Lots of garbage, flat memory",
+          body: "This loop creates 100,000 tables but never keeps more than one.",
           code: {
             lang: "wisp",
             caption: "churn.wisp (run with --gc-log)",
@@ -1263,9 +1561,7 @@ print "done"`,
 [gc] 1024 -> 5 objects, next at 1024
 ... about 100 collections like these ...
 done`,
-          explain: [
-            "Each table is garbage as soon as the loop body's block ends. The few survivors are the script's function and closure and the interned strings `\"n\"` and `\"done\"`. Your exact numbers may differ slightly.",
-          ],
+          explain: ["Each table becomes garbage as soon as its loop pass ends. The few survivors are the script's function and closure and the strings `\"n\"` and `\"done\"`. Your exact numbers may differ slightly."],
         },
       ],
     },
@@ -1274,19 +1570,19 @@ done`,
         q: "Why not use Rust's `Rc` for everything and skip writing a GC?",
         intuition: "Reference counting can't free cycles. Two tables that point at each other keep each other's count above zero forever, even when nothing else can reach them.",
         technical:
-          "Cycles are common in a language with closures and mutable objects: an object holding a closure that captured the object. `Rc` would leak them. A tracing collector handles cycles naturally because it asks \"is this reachable?\", not \"is anyone pointing at it?\". The JVM has never used reference counting for this reason.",
+          "Cycles are common in a language with closures and changeable objects, such as an object holding a closure that captured the object. `Rc` would leak them. A tracing collector handles cycles naturally because it asks \"can the program reach this?\", not \"does anything point at it?\". The JVM has never used reference counting for this reason.",
       },
       {
         q: "The program pauses while the GC runs. How do Java collectors avoid long pauses?",
         intuition: "By doing most of the work while the program keeps running, and only pausing briefly to agree on where things are.",
         technical:
-          "G1 splits the heap into regions and collects a few at a time within a pause-time goal. ZGC and Shenandoah mark and move objects concurrently with the program, using read barriers (small checks on every reference load) to keep things consistent, with pauses well under a millisecond. All of that is built on the mark phase you just wrote.",
+          "G1 splits the heap into regions and collects a few at a time, aiming at a pause-time goal. ZGC and Shenandoah mark and move objects while the program runs, using small checks on every reference read to stay consistent, with pauses well under a millisecond. All of it is built on the mark phase you just wrote.",
       },
       {
         q: "What is a generational collector, and would it help Wisp?",
-        intuition: "Most objects die young, like the tables in that loop. Checking the young ones often and the old ones rarely means each collection looks at far fewer objects.",
+        intuition: "Most objects die young, like the tables in that loop. Checking young objects often and old ones rarely means each collection looks at far fewer objects.",
         technical:
-          "New objects go into a small nursery. A minor collection copies the nursery's survivors to the old space and resets the nursery in one step. It also needs a **write barrier**: when an old object starts pointing at a young one, record it, so minor collections can treat it as a root. It's a substantial project, and a great follow-up once mark-sweep is solid.",
+          "New objects go into a small nursery. A minor collection copies the nursery's survivors to the old space and empties the nursery in one step. It also needs a **write barrier**: whenever an old object starts pointing at a young one, record it, so minor collections can treat it as a root. A substantial project, and a great follow-up once mark-sweep is solid.",
       },
     ],
     references: [
@@ -1305,26 +1601,26 @@ done`,
     summary: "Add `import`: find a file, compile it, run it exactly once, and expose its globals as a table. A small version of the JVM's load, link and initialize.",
     tags: ["Load · link · init", "Re-entrant VM", "Module cache", "Isolation"],
     intro: [
-      "The JVM doesn't load your whole program at startup. It loads each class the first time it's needed. A class loader finds the bytes, the VM links them (verifies, prepares, resolves), and then initializes the class by running its static initializer exactly once.",
-      "Wisp gets the same lifecycle with one expression, `import \"name\"`. It finds `name.wisp`, compiles it, runs it once with its own globals, and returns those globals as a table. Doing that requires one important change to the VM: it must be able to run Wisp code from *inside* an instruction, which means the interpreter becomes **re-entrant**.",
+      "The JVM doesn't load your whole program at startup. It loads each class the first time it's needed: a class loader finds the bytes, the VM links them (checks and prepares them), and then initializes the class by running its static setup code exactly once.",
+      "Wisp gets the same lifecycle with one expression, `import \"name\"`. It finds `name.wisp`, compiles it, runs it once with its own set of globals, and returns those globals as a table. That needs one important change: the VM must be able to run Wisp code from *inside* an instruction, which makes the interpreter **re-entrant**.",
     ],
     sim: "modules",
     simTitle: "Load, link and initialize, once",
     jvm: {
       title: "What class loading teaches us",
       points: [
-        "**Loading** finds a class's bytes (from a JAR, the filesystem, the network...) by its name. Class loaders delegate to their parent first, so `java.lang.String` always comes from the JDK.",
-        "**Linking** verifies the bytecode, prepares static fields with default values, and resolves symbolic references, either eagerly or lazily on first use.",
-        "**Initialization** runs `<clinit>`, the class's static initializer, exactly once, even when several threads race to use the class. Every later use skips straight to the initialized class.",
-        "A class is identified by its name **plus** its loader. Two loaders can load two different `com.app.Config` classes side by side, which is how app servers isolate applications.",
+        "**Loading** finds a class's bytes by its name, from a JAR, a folder or the network. Class loaders ask their parent first, so `java.lang.String` always comes from the JDK.",
+        "**Linking** checks the bytecode, sets up static fields with default values, and connects names to the things they refer to, either eagerly or on first use.",
+        "**Initialization** runs the class's static setup code exactly once, even if several threads race to use the class. Every later use skips straight to the ready class.",
+        "A class is identified by its name **plus** its loader, so two loaders can each load their own `com.app.Config`. That's how app servers keep applications apart.",
       ],
     },
     concepts: [
       {
         heading: "Why the VM needs to be re-entrant",
         body: [
-          "Until now, `run` was the only loop and it owned the whole program. An import happens in the middle of an instruction, and the module body has to run to completion before that instruction can push its result. So the `Import` handler calls back into the interpreter, a nested `run` on the same VM, which must stop when the module's frame returns instead of when *all* frames return.",
-          "The fix is one number. `run(stop_at)` returns when the frame count drops back to `stop_at`. The script runs with `stop_at = 0`, and a module runs with whatever depth the importer was at. The same mechanism later lets native Rust functions call Wisp callbacks.",
+          "Until now, `run` was the only loop and it owned the whole program. An import happens in the middle of an instruction, and the module's code has to run to completion before that instruction can push its result. So the `Import` instruction calls back into the interpreter: a second `run` on the same VM, which must stop when the *module* finishes, not when every frame is gone.",
+          "The fix is one number. `run(stop_at)` returns when the number of frames drops back to `stop_at`. The script runs with `stop_at = 0`, and a module runs with whatever depth the importer was at. Natives use the same mechanism to call Wisp callbacks.",
         ],
       },
     ],
@@ -1333,59 +1629,80 @@ done`,
       milestone: "`let geo = import \"geometry\"` loads `geometry.wisp` once, and `geo.area(3, 4)` calls into it.",
       steps: [
         {
-          title: "Front end: the import expression",
-          body: "`import` is an expression, so its result can be stored in any variable.",
+          section: "Part 1 · The front end",
+          title: "Lex and parse the import expression",
+          body: "**What it's for:** `import` is an expression, so its result can be stored in any variable. It needs a new keyword, a new AST node, and one new case in the parser's `prefix`.",
           code: {
             lang: "rust",
-            caption: "lexer.rs, ast.rs, parser.rs, compiler.rs, chunk.rs",
+            caption: "src/lexer.rs, src/ast.rs, src/parser.rs (changes)",
             code: `// lexer.rs: a new keyword
 Import,                         // in enum Tok
 "import" => Tok::Import,        // in keyword()
 
-// ast.rs
-Import(String, u32),            // in enum Expr: import "path"
+// ast.rs: a new expression
+Import(String, u32),            // in enum Expr:  import "path"
 
-// parser.rs: a new prefix case in expr()
+// parser.rs: a new case in prefix()
 Tok::Import => match self.advance() {
     Tok::Str(path) => Expr::Import(path, line),
     _ => return Err(format!("[line {line}] import needs a module name in quotes")),
-},
-
-// compiler.rs: in expr()
+},`,
+          },
+        },
+        {
+          title: "Compile it to one instruction",
+          body: "**What it's for:** the compiler puts the module name in the constant pool and emits `Import`, which pushes the module's export table.",
+          code: {
+            lang: "rust",
+            caption: "src/compiler.rs and src/chunk.rs (changes)",
+            code: `// compiler.rs, in expr():
 Expr::Import(path, line) => {
     self.line = *line;
     let k = self.str_const(path);
     self.emit(Op::Import(k));
 }
 
-// chunk.rs
-Import(u16),                    // operand = module-name constant`,
+// chunk.rs, a new variant in Op:
+Import(u16), // operand = module-name constant`,
           },
         },
         {
-          title: "Make the interpreter re-entrant",
-          body: "Split \"start running this closure\" from \"the loop\". `execute` sets up a call exactly like `Call` does, and `run(stop_at)` returns when that call returns.",
+          section: "Part 2 · A re-entrant VM",
+          title: "execute(): run a closure to completion",
+          body: "**What it's for:** a single way to run Wisp code from Rust, used for the main script and for every module body. It sets up the call exactly like `Call` does, remembers how deep the frame stack was, runs until the call returns, and hands back the result.",
           code: {
             lang: "rust",
             caption: "src/vm.rs (changes)",
             code: `impl Vm {
-    /// Run a zero-argument closure to completion and return its result.
-    /// Used for the main script, for module bodies, and later for native callbacks.
     pub fn execute(&mut self, closure: ObjRef) -> Result<Value, String> {
         let func = self.func_of(closure);
-        self.push(Value::Obj(closure));  // the callee slot, as Call expects
-        let stop_at = self.frames.len(); // stop when we're back at this depth
+        self.push(Value::Obj(closure));  // the callee slot, just like a normal call
+        let stop_at = self.frames.len(); // stop when the frame stack is back to this depth
         self.frames.push(CallFrame { closure, func, ip: 0, base: self.stack.len() });
         self.run(stop_at)?;
         Ok(self.pop())                   // Return left the result on the stack
     }
-
+}`,
+          },
+          explain: [
+            "Pushing the closure first gives the frame the same layout as any call: function below, locals from `base`. So `Return` can treat the script like every other function.",
+            "`stop_at` is the number of frames that existed *before* this call. When it's reached again, this call has finished.",
+          ],
+          jvm: "HotSpot does the same whenever VM code needs to run Java code, such as class initialization or `Method.invoke`. Its `JavaCalls::call` sets up a frame and enters the interpreter recursively, so Java and VM frames end up interleaved on one thread's stack.",
+        },
+        {
+          title: "run(stop_at): stop at the right depth",
+          body: "**What it's for:** `run` now takes the depth to stop at, and loads its four locals from whatever frame is on top. `Return` checks whether the frame count has dropped back to `stop_at`, which means \"the call that `execute` started is done\".",
+          code: {
+            lang: "rust",
+            caption: "src/vm.rs (changes)",
+            code: `impl Vm {
     fn run(&mut self, stop_at: usize) -> Result<(), String> {
-        // load the hot state from whatever frame is on top
+        // pick up wherever the top frame is
         let top = self.frames.last().unwrap();
         let (mut closure, mut func, mut ip, mut base) = (top.closure, top.func.clone(), top.ip, top.base);
         loop {
-            // ...fetch and match as before...
+            // ...fetch and match exactly as before, except Return:
             Op::Return => {
                 let result = self.pop();
                 self.close_upvalues(base);
@@ -1393,82 +1710,91 @@ Import(u16),                    // operand = module-name constant`,
                 self.stack.truncate(base - 1);
                 self.push(result);
                 if self.frames.len() == stop_at {
-                    return Ok(()); // back at the depth execute() started from
+                    return Ok(()); // the call execute() started has finished
                 }
-                // otherwise restore the caller's hot state, as before
+                // otherwise switch back to the caller, as before
             }
         }
     }
 }
 
-// main.rs: the script is now just the first thing we execute
+// main.rs: the script is just the first thing we execute
 let script = compiler::compile(&program, &mut vm.heap)?;
-let closure = vm.new_closure(script); // wraps a Function in a Closure with no upvalues
+let closure = vm.new_closure(script);
 vm.execute(closure)?;`,
           },
           explain: [
-            "The script is now pushed onto the stack like any callee, so its frame's `base` is 1 instead of 0. Every other frame already worked this way, so `Return` no longer needs a special case for the script.",
-            "Each nested `run` has its own Rust local variables (`func`, `ip`...), so when the inner one returns, the outer one carries on exactly where it was. Rust's own call stack keeps track of the nesting for us.",
+            "Each nested `run` has its own Rust local variables (`func`, `ip`...). When the inner one returns, the outer one carries on exactly where it was. Rust's own call stack keeps track of the nesting for us.",
           ],
-          jvm: "HotSpot does the same thing whenever VM code needs to run Java code: class initialization, `Method.invoke`, JNI calling back into Java. The C++ function `JavaCalls::call` sets up a frame and enters the interpreter recursively, and the Java and native frames end up interleaved on one thread stack.",
         },
         {
-          title: "The import instruction",
-          body: "Check the cache first. On a miss, save `ip`, then load, compile and execute the module with a fresh set of globals. Whatever the module defined becomes its export table.",
+          section: "Part 3 · The import instruction",
+          title: "Arm: Import, with a cache",
+          body: "**What it does:** checks whether the module was already loaded and, if so, reuses its export table. Otherwise it saves `ip` (because other code is about to run), loads the module, and remembers the result for next time.",
           code: {
             lang: "rust",
-            caption: "src/vm.rs (changes)",
-            code: `// Vm gains:
-//   modules: HashMap<String, Value>,             // name -> export table (loaded once)
-//   suspended: Vec<HashMap<String, Value>>,      // importers' globals while a module runs
-// and collect() adds both to its roots.
+            caption: "src/vm.rs · inside run's match",
+            code: `// new Vm fields:
+//   modules: HashMap<String, Value>,        // module name -> export table (each loaded once)
+//   suspended: Vec<HashMap<String, Value>>, // importers' globals while a module runs
+// collect() adds the values of both to its roots.
 
-Op::Import(k) => {
-    let name = self.heap.show(func.chunk.consts[k as usize]);
-    let exports = match self.modules.get(&name) {
-        Some(&cached) => cached, // already initialized: never run a module twice
-        None => {
-            self.frames.last_mut().unwrap().ip = ip; // save our place before re-entering
-            let exports = self.load_module(&name)?;
-            self.modules.insert(name, exports);
-            exports
+                Op::Import(k) => {
+                    let name = self.heap.show(func.chunk.consts[k as usize]);
+                    let exports = match self.modules.get(&name) {
+                        Some(&cached) => cached, // already initialized: never run a module twice
+                        None => {
+                            self.frames.last_mut().unwrap().ip = ip; // save our place before re-entering
+                            let exports = self.load_module(&name)?;
+                            self.modules.insert(name, exports);
+                            exports
+                        }
+                    };
+                    self.push(exports);
+                }`,
+          },
+        },
+        {
+          title: "load_module(): load, link, initialize, export",
+          body: "**What it's for:** the four stages of bringing a module in. Read its file, compile it with the normal pipeline, run its code once against an empty set of globals, then turn whatever globals it defined into a table.",
+          code: {
+            lang: "rust",
+            caption: "src/vm.rs (continued)",
+            code: `impl Vm {
+    fn load_module(&mut self, name: &str) -> Result<Value, String> {
+        // 1. LOAD: find the source. Our "classpath" is just the current folder.
+        let source = std::fs::read_to_string(format!("{name}.wisp"))
+            .map_err(|e| format!("cannot import '{name}': {e}"))?;
+        // 2. LINK: compile it with the same pipeline as the main script
+        let program = parser::parse(lexer::lex(&source)?)?;
+        let func = compiler::compile(&program, &mut self.heap)?;
+        let closure = self.new_closure(func);
+        // 3. INITIALIZE: run it once, with fresh empty globals
+        let importer = std::mem::take(&mut self.globals);
+        self.suspended.push(importer); // the GC can still see the importer's globals
+        let result = self.execute(closure);
+        let module_globals = std::mem::replace(&mut self.globals, self.suspended.pop().unwrap());
+        result?;
+        // 4. EXPORT: the module's globals become one table
+        let mut table = HashMap::new();
+        for (name, value) in module_globals {
+            table.insert(self.heap.intern(&name), value);
         }
-    };
-    self.push(exports);
-}
-
-fn load_module(&mut self, name: &str) -> Result<Value, String> {
-    // 1. LOAD: find the source. Our "classpath" is the current directory.
-    let source = std::fs::read_to_string(format!("{name}.wisp"))
-        .map_err(|e| format!("cannot import '{name}': {e}"))?;
-    // 2. LINK: compile it with the same pipeline as the main script
-    let program = parser::parse(lexer::lex(&source)?)?;
-    let func = compiler::compile(&program, &mut self.heap)?;
-    let closure = self.new_closure(func);
-    // 3. INITIALIZE: run the body once, against a fresh, empty set of globals
-    let importer = std::mem::take(&mut self.globals);
-    self.suspended.push(importer); // keeps the importer's globals visible to the GC
-    let result = self.execute(closure);
-    let module_globals = std::mem::replace(&mut self.globals, self.suspended.pop().unwrap());
-    result?;
-    // 4. EXPORT: the module's globals become the fields of one table
-    let mut table = HashMap::new();
-    for (name, value) in module_globals {
-        table.insert(self.heap.intern(&name), value);
+        Ok(Value::Obj(self.heap.alloc(Obj::Table(table))))
     }
-    Ok(Value::Obj(self.heap.alloc(Obj::Table(table))))
 }`,
           },
           explain: [
-            "`std::mem::take` swaps in an empty `HashMap` and hands back the old one. The module can't see or change the importer's globals, and when it finishes, `replace` swaps them back.",
-            "The importer's globals are parked in `self.suspended` instead of a Rust local, because a collection during the module's execution must still see them as roots. That's the rule from the GC lesson: live values must be somewhere the collector looks.",
-            "The export table is built from Rust values without calling `maybe_gc`, so nothing can be collected halfway through building it.",
-            "Circular imports (A imports B, which imports A) would recurse forever here. Insert a placeholder into `modules` before loading and report an error if an import finds it.",
+            "`mem::take` swaps in an empty map and hands back the old one, so the module can't see or change the importer's globals. `mem::replace` swaps them back afterwards.",
+            "The importer's globals are parked in `self.suspended` instead of a plain Rust variable, so a collection while the module runs still sees them as roots. That's the GC rule from lesson 09: live values must be somewhere the collector looks.",
+            "`result?` comes *after* the globals are restored, so even a failing module leaves the importer's state intact.",
+            "Circular imports (A imports B, which imports A) would loop forever here. Put a placeholder in `modules` before loading, and report an error if an import finds it.",
           ],
         },
         {
-          title: "Try it",
-          body: "Two files in the same folder.",
+          section: "Part 4 · Try it",
+          title: "Two files",
+          body: "Put both files in the same folder and run `main.wisp`.",
           code: {
             lang: "wisp",
             caption: "geometry.wisp, then main.wisp",
@@ -1483,8 +1809,8 @@ print geo.area(3, 4) + again.unit`,
           output: `geometry loaded
 13`,
           explain: [
-            "\"geometry loaded\" prints once even though the module is imported twice. The second import is a cache hit, which is the same once-only rule as Java's `<clinit>`.",
-            "`geo.area(3, 4)` is a field read followed by an ordinary call. The closure was created inside the module and carries its own constants, so it works anywhere.",
+            "\"geometry loaded\" prints once even though the module is imported twice. The second import hits the cache, which is the same once-only rule as Java's class initialization.",
+            "`geo.area(3, 4)` is a field read followed by an ordinary call. The closure was made inside the module and carries its own constants, so it works anywhere.",
           ],
         },
       ],
@@ -1494,19 +1820,19 @@ print geo.area(3, 4) + again.unit`,
         q: "Why run a module only once?",
         intuition: "A module sets things up: functions, constants, maybe a cache. Running it again would reset that state and repeat any side effects, like printing or opening files.",
         technical:
-          "Initialize-once means a module's top level behaves like a singleton constructor, which is exactly what `<clinit>` guarantees. The JVM also makes initialization thread-safe: a second thread waits until the first has finished initializing. If you add real threads to Wisp, the module cache needs the same lock.",
+          "Run-once makes a module's top level behave like a setup function that runs a single time, which is exactly what the JVM guarantees for static initialization. The JVM also makes it thread-safe: a second thread waits until the first has finished. If you add real threads to Wisp, the module cache needs the same lock.",
       },
       {
         q: "Should Wisp cache compiled modules on disk, like `.class` files or Python's `.pyc`?",
         intuition: "It saves recompiling unchanged files at startup. For small scripts compiling is already fast, so only bother when startup time matters.",
         technical:
-          "Serialize each `Function` (constants, code, lines, upvalue lists) with a magic number and a version header, and store the source file's modification time or a hash so a stale cache is ignored. Loading cached bytecode also means you should validate it, which is the role of the JVM's verifier.",
+          "Save each `Function` (constants, code, lines, capture lists) with a magic number and a version, plus the source file's modification time so a stale cache is ignored. Loading saved bytecode also means you should check it before trusting it, which is the job of the JVM's verifier.",
       },
       {
-        q: "How would I let modules import from other directories?",
+        q: "How would I let modules import from other folders?",
         intuition: "Keep a list of folders to search, like Java's classpath, and try each one in order.",
         technical:
-          "Add `search_path: Vec<PathBuf>` with the standard library's folder first, then the script's folder, then anything from a `WISP_PATH` environment variable. Searching the standard library first mirrors parent-first delegation in Java class loaders: user code can't accidentally replace a core module.",
+          "Add `search_path: Vec<PathBuf>` with the standard library's folder first, then the script's folder, then anything from a `WISP_PATH` environment variable. Searching the standard library first mirrors Java's parent-first class loading: user code can't accidentally replace a core module.",
       },
     ],
     references: [
