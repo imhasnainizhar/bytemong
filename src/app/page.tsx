@@ -16,7 +16,7 @@ const features = [
     icon: Hammer,
     color: "#8b5cf6",
     title: "Build-along, not read-along",
-    body: "Each stop ends with a concrete build plan and Rust sketches for your own VM, from the first opcode to a baseline JIT.",
+    body: "One growing Rust codebase, built step by step: commented code, a walkthrough of how it works, and the output you should see.",
   },
   {
     icon: FlaskConical,
