@@ -52,10 +52,10 @@ export const archNodes: ArchNode[] = [
     ],
     code: {
       lang: "rust",
-      code: `let tokens = lex(src)?;
-let ast    = parse(&tokens)?;
-let ast    = resolve(ast)?;      // locals → slots, captures → upvalues
-let proto  = codegen(&ast)?;     // FunctionProto { code, consts, lines }`,
+      code: `let tokens  = lexer::lex(src)?;              // text   -> tokens
+let program = parser::parse(tokens)?;         // tokens -> Vec<Stmt>
+let script  = compiler::compile(&program, &mut vm.heap)?; // -> Function
+vm.execute(vm.new_closure(script))?;`,
     },
     lesson: "front-end",
   },
@@ -77,10 +77,10 @@ let proto  = codegen(&ast)?;     // FunctionProto { code, consts, lines }`,
     ],
     code: {
       lang: "rust",
-      code: `pub struct FunctionProto {
-    pub name: Sym, pub arity: u8, pub upvalues: u8,
-    pub code: Vec<u8>, pub consts: Vec<Value>,
-    pub lines: Vec<(u32, u32)>, pub ic: Vec<InlineCache>,
+      code: `pub struct Chunk {
+    pub code: Vec<Op>,      // instructions, 4 bytes each
+    pub lines: Vec<u32>,    // source line per instruction
+    pub consts: Vec<Value>, // the constant pool
 }`,
     },
     lesson: "bytecode",
@@ -121,15 +121,17 @@ let proto  = codegen(&ast)?;     // FunctionProto { code, consts, lines }`,
     ],
     code: {
       lang: "rust",
-      code: `fn alloc<T: Trace>(&mut self, obj: T) -> Gc<T> {
-    self.bytes_allocated += size_of::<T>();
-    if self.bytes_allocated > self.next_gc || self.flags.gc_stress {
-        self.collect();
+      code: `pub fn alloc(&mut self, obj: Obj) -> ObjRef {
+    self.live += 1;
+    if let Some(i) = self.free.pop() {        // reuse a freed slot
+        self.objects[i as usize] = Some(obj);
+        return ObjRef(i);
     }
-    self.heap.insert(obj)
+    self.objects.push(Some(obj));
+    ObjRef(self.objects.len() as u32 - 1)
 }`,
     },
-    lesson: "memory",
+    lesson: "objects",
   },
   {
     id: "protos",
@@ -165,7 +167,7 @@ let proto  = codegen(&ast)?;     // FunctionProto { code, consts, lines }`,
       "Check base + max_stack on CALL and raise a Wisp StackOverflow error.",
       "Pick a value representation: a tagged enum now, NaN-boxing later.",
     ],
-    lesson: "memory",
+    lesson: "functions",
   },
   {
     id: "frames",
@@ -185,9 +187,9 @@ let proto  = codegen(&ast)?;     // FunctionProto { code, consts, lines }`,
     ],
     code: {
       lang: "rust",
-      code: `struct CallFrame { closure: Gc<Closure>, ip: usize, base: usize }`,
+      code: `struct CallFrame { closure: ObjRef, func: Rc<Function>, ip: usize, base: usize }`,
     },
-    lesson: "execution-engine",
+    lesson: "functions",
   },
   {
     id: "fibers",
@@ -226,13 +228,14 @@ let proto  = codegen(&ast)?;     // FunctionProto { code, consts, lines }`,
     code: {
       lang: "rust",
       code: `loop {
-    let op = code[ip]; ip += 1;
-    match Op::from(op) {
-        Op::Add => binary_num!(+, add_slow),
-        Op::GetProp => get_prop_cached!(),
-        Op::Call => { save_ip!(); self.call(argc)?; reload_frame!(); }
-        Op::Return => { /* close upvalues, pop frame */ }
-        _ => unreachable!(),
+    let op = func.chunk.code[ip];
+    ip += 1; // advance first, so jumps can overwrite ip
+    match op {
+        Op::Const(k) => self.push(func.chunk.consts[k as usize]),
+        Op::GetLocal(s) => self.push(self.stack[base + s as usize]),
+        Op::Call(argc) => { /* save ip, push a frame, switch hot state */ }
+        Op::Return => { /* close upvalues, pop frame, restore caller */ }
+        // ...
     }
 }`,
     },
@@ -275,10 +278,9 @@ let proto  = codegen(&ast)?;     // FunctionProto { code, consts, lines }`,
     code: {
       lang: "rust",
       code: `fn collect(&mut self) {
-    self.mark_roots();
-    while let Some(o) = self.gray.pop() { self.blacken(o); }
-    self.sweep();
-    self.next_gc = self.bytes_allocated * 2;
+    let roots = self.roots();   // stack, globals, frames, open upvalues
+    self.heap.mark(roots);      // gray worklist -> black
+    self.heap.sweep();          // free the white, next_gc = live * 2
 }`,
     },
     lesson: "gc",
